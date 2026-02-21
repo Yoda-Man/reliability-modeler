@@ -1,0 +1,22 @@
+﻿api-1  | INFO:     Started server process [1]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/main.py", line 104, in analyze_failure_data
+api-1  |     "parameters": {k: round(v, 6) for k, v in params.items()}
+api-1  |                                               ^^^^^^^^^^^^
+api-1  | AttributeError: 'numpy.ndarray' object has no attribute 'items'
+api-1  | INFO:     172.19.0.1:57554 - "POST /analyze HTTP/1.1" 500 Internal Server Error
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/main.py", line 104, in analyze_failure_data
+api-1  |     "parameters": {k: round(v, 6) for k, v in params.items()}
+api-1  |                                               ^^^^^^^^^^^^
+api-1  | AttributeError: 'numpy.ndarray' object has no attribute 'items'
+api-1  | INFO:     172.19.0.1:37536 - "POST /analyze HTTP/1.1" 500 Internal Server Error
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/main.py", line 104, in analyze_failure_data
+api-1  |     "parameters": {k: round(v, 6) for k, v in params.items()}
+api-1  |                                               ^^^^^^^^^^^^
+api-1  | AttributeError: 'numpy.ndarray' object has no attribute 'items'
+api-1  | INFO:     172.19.0.1:40186 - "POST /analyze HTTP/1.1" 500 Internal Server Error
