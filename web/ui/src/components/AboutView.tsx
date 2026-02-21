@@ -26,7 +26,7 @@ export default function AboutView() {
                     <div className="flex items-center space-x-6 mb-12">
                         <SocialLink href="https://github.com/Yoda-Man/" icon={<Github size={20} />} label="GitHub" />
                         <div className="h-4 w-[1px] bg-slate-800" />
-                        <SocialLink href="#" icon={<Globe size={20} />} label="Website" />
+                        <SocialLink href="http://www.workforceanalytics.co.za/" icon={<Globe size={20} />} label="Website" />
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full text-left">
