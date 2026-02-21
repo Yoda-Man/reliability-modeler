@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Manual | Reliability Modeler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #020617;
+            color: #94a3b8;
+            scroll-behavior: smooth;
+        }
+
+        .glass-sidebar {
+            background: rgba(15, 23, 42, 0.8);
+            border-right: 1px solid rgba(30, 41, 59, 0.5);
+            backdrop-filter: blur(20px);
+        }
+
+        .content-card {
+            background: rgba(15, 23, 42, 0.3);
+            border: 1px solid rgba(30, 41, 59, 0.3);
+        }
+
+        .nav-link {
+            transition: all 0.2s;
+        }
+
+        .nav-link:hover {
+            background: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+        }
+
+        .nav-link.active {
+            background: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+            border-left: 2px solid #3b82f6;
+        }
+
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #020617;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #1e293b;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+
+<body class="flex">
+
+    <!-- Sidebar Navigation -->
+    <aside class="w-72 h-screen glass-sidebar fixed left-0 top-0 overflow-y-auto hidden lg:block z-50">
+        <div class="p-8">
+            <div class="flex items-center space-x-3 mb-12">
+                <div
+                    class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                    <i data-lucide="shield-check" class="text-white w-6 h-6"></i>
+                </div>
+                <span class="text-white font-extrabold tracking-tight">Manual 2.0</span>
+            </div>
+
+            <nav class="space-y-6">
+                <div>
+                    <h5 class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Getting Started</h5>
+                    <ul class="space-y-1">
+                        <li><a href="#intro"
+                                class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Introduction</a></li>
+                        <li><a href="#quickstart" class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Quick
+                                Start</a></li>
+                    </ul>
+                </div>
+                <div>
+                    <h5 class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Interface</h5>
+                    <ul class="space-y-1">
+                        <li><a href="#dashboard"
+                                class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Dashboard</a></li>
+                        <li><a href="#archives" class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Log
+                                Archives</a></li>
+                        <li><a href="#config"
+                                class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Configurations</a></li>
+                    </ul>
+                </div>
+                <div>
+                    <h5 class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Data & Math</h5>
+                    <ul class="space-y-1">
+                        <li><a href="#dataprep" class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Data
+                                Preparation</a></li>
+                        <li><a href="#troubleshoot"
+                                class="nav-link flex items-center px-4 py-2 rounded-lg text-sm">Troubleshooting</a></li>
+                    </ul>
+                </div>
+            </nav>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="lg:ml-72 flex-1 min-h-screen px-8 md:px-16 py-12">
+        <div class="max-w-4xl">
+
+            <!-- Section: Introduction -->
+            <section id="intro" class="pt-12 mb-24">
+                <h1 class="text-4xl font-extrabold text-white mb-6">Introduction</h1>
+                <p class="text-lg text-slate-400 leading-relaxed mb-8">
+                    The Reliability Modeler is an advanced predictive analytics platform designed to help engineering
+                    teams quantify software stability. By analyzing failure intervals, the system provides a roadmap for
+                    release readiness and long-term maintenance planning.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="content-card p-6 rounded-2xl">
+                        <i data-lucide="zap" class="text-blue-500 w-8 h-8 mb-4"></i>
+                        <h3 class="text-white font-bold mb-2">Instant Analysis</h3>
+                        <p class="text-xs text-slate-500">FastAPI-powered engine performs model fitting in milliseconds
+                            using Scipy's TNC/L-BFGS-B optimizers.</p>
+                    </div>
+                    <div class="content-card p-6 rounded-2xl">
+                        <i data-lucide="eye" class="text-emerald-500 w-8 h-8 mb-4"></i>
+                        <h3 class="text-white font-bold mb-2">Predictive Vision</h3>
+                        <p class="text-xs text-slate-500">Not just raw data—get projections for future failures and Mean
+                            Time Between Failures (MTBF).</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Quick Start -->
+            <section id="quickstart" class="mb-24 scroll-mt-24">
+                <h2 class="text-2xl font-bold text-white mb-8 flex items-center">
+                    <i data-lucide="play" class="w-5 h-5 mr-3 text-blue-500"></i>
+                    Quick Start Guide
+                </h2>
+                <div class="space-y-4">
+                    <div class="flex items-start space-x-6 p-6 rounded-2xl bg-slate-900/40">
+                        <span class="text-2xl font-black text-slate-800">01</span>
+                        <div>
+                            <h4 class="text-white font-bold mb-1">Launch the Container</h4>
+                            <p class="text-xs text-slate-500">Run <code>docker-compose up --build</code> in your project
+                                directory.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start space-x-6 p-6 rounded-2xl bg-slate-900/40">
+                        <span class="text-2xl font-black text-slate-800">02</span>
+                        <div>
+                            <h4 class="text-white font-bold mb-1">Upload failure data</h4>
+                            <p class="text-xs text-slate-500">Drag a CSV onto the dashboard. Don't have one? Use the
+                                "Try with Sample Data" button.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start space-x-6 p-6 rounded-2xl bg-slate-900/40">
+                        <span class="text-2xl font-black text-slate-800">03</span>
+                        <div>
+                            <h4 class="text-white font-bold mb-1">Explore Insights</h4>
+                            <p class="text-xs text-slate-500">Review the Growth Projection chart and adjust the Horizon
+                                Slider to see future trends.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Dashboard -->
+            <section id="dashboard" class="mb-24 scroll-mt-24">
+                <h2 class="text-2xl font-bold text-white mb-8 flex items-center">
+                    <i data-lucide="layout" class="w-5 h-5 mr-3 text-blue-500"></i>
+                    The Dashboard Interface
+                </h2>
+                <p class="text-sm text-slate-400 mb-8">The main analytical cockpit provides a three-layered view of your
+                    data.</p>
+
+                <div class="space-y-12">
+                    <div class="p-8 rounded-3xl content-card border-blue-500/20">
+                        <h4 class="text-white font-bold mb-4 flex items-center">
+                            <span class="w-2 h-2 rounded-full bg-blue-500 mr-3"></span>
+                            KPI Grid
+                        </h4>
+                        <div class="grid grid-cols-2 gap-4 text-xs">
+                            <div class="p-4 rounded-xl bg-slate-950">
+                                <span class="text-slate-500 block mb-1">Total Failures</span>
+                                <span class="text-white font-bold">Raw count of all valid incidents.</span>
+                            </div>
+                            <div class="p-4 rounded-xl bg-slate-950">
+                                <span class="text-slate-500 block mb-1">Predicted Residuals</span>
+                                <span class="text-white font-bold">Expected remaining faults in the system.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="p-8 rounded-3xl content-card border-emerald-500/20">
+                        <h4 class="text-white font-bold mb-4 flex items-center">
+                            <span class="w-2 h-2 rounded-full bg-emerald-500 mr-3"></span>
+                            Prediction Playground
+                        </h4>
+                        <p class="text-xs text-slate-400 leading-relaxed mb-4">Located at the top of the dashboard, the
+                            <strong>Horizon Slider</strong> allows you to virtually extend time. As you slide, the
+                            system re-calculates reliability figures up to 5,000 hours ahead, showing you the projected
+                            "flattening" of the failure curve.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Data Prep -->
+            <section id="dataprep" class="mb-24 scroll-mt-24">
+                <h2 class="text-2xl font-bold text-white mb-8 flex items-center">
+                    <i data-lucide="file-text" class="w-5 h-5 mr-3 text-blue-500"></i>
+                    Data Preparation
+                </h2>
+                <div class="content-card p-8 rounded-3xl">
+                    <h4 class="text-white font-bold mb-4">Optimal CSV Schema</h4>
+                    <table class="w-full text-xs text-left mb-6">
+                        <thead>
+                            <tr class="text-slate-500 border-b border-slate-800">
+                                <th class="pb-3">Column</th>
+                                <th class="pb-3">Format</th>
+                                <th class="pb-3">Role</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-slate-300">
+                            <tr>
+                                <td class="py-3 font-mono">Timestamp</td>
+                                <td class="py-3 italic">YYYY-MM-DD HH:MM</td>
+                                <td class="py-3">Temporal anchor</td>
+                            </tr>
+                            <tr class="border-t border-slate-900">
+                                <td class="py-3 font-mono">Description</td>
+                                <td class="py-3 italic">Text string</td>
+                                <td class="py-3">Category mapping</td>
+                            </tr>
+                            <tr class="border-t border-slate-900">
+                                <td class="py-3 font-mono">Severity</td>
+                                <td class="py-3 italic">Numeric (1-5)</td>
+                                <td class="py-3">Optional filtering</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div
+                        class="p-4 rounded-xl bg-blue-500/5 border border-blue-500/20 text-[10px] text-blue-400 leading-relaxed uppercase tracking-wider">
+                        <strong>Pro Tip:</strong> The system uses fuzzy matching. It will attempt to find columns named
+                        'date', 'time', or 'logged' even if they aren't labeled exactly 'Timestamp'.
+                    </div>
+                </div>
+            </section>
+
+            <!-- Footer -->
+            <footer class="mt-32 pt-12 border-t border-slate-900">
+                <div class="flex justify-between items-center">
+                    <p class="text-xs text-slate-600">© 2026 Reliability Modeler Suite</p>
+                    <div class="flex space-x-4">
+                        <i data-lucide="github" class="w-4 h-4 text-slate-700"></i>
+                        <i data-lucide="globe" class="w-4 h-4 text-slate-700"></i>
+                    </div>
+                </div>
+            </footer>
+        </div>
+    </main>
+
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+
+</html>

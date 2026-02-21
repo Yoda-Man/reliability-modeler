@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SRGM Mathematical Guide | Reliability Modeler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #020617; color: #94a3b8; }
+        .math-card { background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(30, 41, 59, 0.5); backdrop-filter: blur(12px); }
+        .accent-gradient { background: linear-gradient(135deg, #3b82f6 0%, #10b981 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #020617; }
+        ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #334155; }
+    </style>
+</head>
+<body class="selection:bg-blue-500/30 selection:text-white">
+    <div class="max-w-4xl mx-auto px-6 py-20">
+        <!-- Header -->
+        <header class="mb-20 text-center">
+            <div class="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-widest mb-6">
+                Technical Deep-Dive
+            </div>
+            <h1 class="text-5xl md:text-6xl font-extrabold text-white mb-6 tracking-tight">
+                Software Reliability <br><span class="accent-gradient">Growth Modeling</span>
+            </h1 >
+            <p class="text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
+                A quantitative engine for predicting software stability, defect removal efficiency, and release readiness through non-homogeneous Poisson processes.
+            </p>
+        </header>
+
+        <!-- Section 1: Introduction -->
+        <section class="mb-24">
+            <h2 class="text-2xl font-bold text-white mb-8 flex items-center">
+                <span class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-sm mr-4 shadow-lg shadow-blue-500/20">01</span>
+                The Foundation
+            </h2>
+            <div class="space-y-6 text-slate-300">
+                <p>
+                    Software Reliability Growth Models (SRGMs) are mathematical expressions that model the fault removal process during testing and operational phases. 
+                    The core assumption is that as software is tested and faults are removed, the failure frequency (intensity) decreases over time.
+                </p>
+                <div class="math-card p-8 rounded-3xl">
+                    <p class="text-sm font-bold text-blue-400 uppercase tracking-widest mb-4">Core Equation (NHPP)</p>
+                    <div class="text-2xl text-white py-4 overflow-x-auto text-center">
+                        \[ P(N(t) = n) = \frac{[\mu(t)]^n}{n!} e^{-\mu(t)} \]
+                    </div>
+                    <p class="text-xs text-slate-500 mt-4 leading-relaxed italic">
+                        Where \( N(t) \) is the number of failures observed at time \( t \), and \( \mu(t) \) is the mean value function representing the expected number of failures.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: Models -->
+        <section class="mb-24">
+            <h2 class="text-2xl font-bold text-white mb-12 flex items-center">
+                <span class="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center text-sm mr-4 shadow-lg shadow-emerald-500/20">02</span>
+                Analytical Models
+            </h2>
+
+            <!-- GO Model -->
+            <div class="mb-16">
+                <h3 class="text-xl font-bold text-white mb-4">Goel-Okumoto (GO) Model</h3>
+                <p class="text-sm text-slate-400 mb-8 leading-relaxed">
+                    The GO model assumes that failure intensity decreases exponentially. It is effective for systems where the reliability growth is consistent and fault removal is immediate and perfect.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="math-card p-6 rounded-2xl">
+                        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 font-mono">Mean Value Function</p>
+                        <div class="text-xl text-white py-2">
+                             \[ \mu(t) = a(1 - e^{-bt}) \]
+                        </div>
+                    </div>
+                    <div class="math-card p-6 rounded-2xl">
+                        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 font-mono">Failure Intensity</p>
+                        <div class="text-xl text-white py-2">
+                             \[ \lambda(t) = ab \cdot e^{-bt} \]
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-4 p-4 rounded-xl bg-slate-900/30 border border-slate-800 text-[11px] text-slate-400 font-mono">
+                    <span class="text-blue-400">a:</span> Total expected number of faults <br>
+                    <span class="text-blue-400">b:</span> Fault detection rate (per hour)
+                </div>
+            </div>
+
+            <!-- MO Model -->
+            <div>
+                <h3 class="text-xl font-bold text-white mb-4">Musa-Okumoto (MO) Model</h3>
+                <p class="text-sm text-slate-400 mb-8 leading-relaxed">
+                    Also known as the Logarithmic Poisson Execution Time model. It suggests that earlier faults contribute more to the failure rate than later ones, providing a more realistic "pessimistic" decay curve.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="math-card p-6 rounded-2xl">
+                        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 font-mono">Mean Value Function</p>
+                        <div class="text-xl text-white py-2">
+                             \[ \mu(t) = \frac{1}{\theta} \ln(1 + \lambda_0 \theta t) \]
+                        </div>
+                    </div>
+                    <div class="math-card p-6 rounded-2xl">
+                        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 font-mono">Failure Intensity</p>
+                        <div class="text-xl text-white py-2">
+                             \[ \lambda(t) = \frac{\lambda_0}{1 + \lambda_0 \theta t} \]
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-4 p-4 rounded-xl bg-slate-900/30 border border-slate-800 text-[11px] text-slate-400 font-mono">
+                    <span class="text-blue-400">&lambda;₀:</span> Initial failure intensity <br>
+                    <span class="text-blue-400">&theta;:</span> Failure intensity reduction parameter
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 3: Criteria -->
+        <section class="mb-24">
+            <h2 class="text-2xl font-bold text-white mb-8 flex items-center">
+                <span class="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center text-sm mr-4 shadow-lg shadow-rose-500/20">03</span>
+                Model Selection Strategy
+            </h2>
+            <div class="math-card p-8 rounded-3xl">
+                <p class="text-white font-semibold mb-4">The Akaike Information Criterion (AIC)</p>
+                <p class="text-sm text-slate-400 leading-relaxed mb-6">
+                    Instead of just checking raw accuracy, we use AIC to balance fitting quality against model complexity. This prevents "overfitting" where a model looks perfect on old data but fails to predict the future.
+                </p>
+                <div class="text-xl text-white py-4 border-y border-slate-800 text-center">
+                    \[ AIC = 2k - 2\ln(\hat{L}) \]
+                </div>
+                <div class="mt-6 flex items-start space-x-4">
+                    <div class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20">
+                        <span class="text-rose-400 font-bold text-xs uppercase">Decision Rule</span>
+                    </div>
+                    <p class="text-xs text-slate-300 italic">
+                        A lower AIC indicates a better model. If GO has an AIC of 150 and MO has 142, MO is mathematically superior for the current dataset.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="mt-32 pt-12 border-t border-slate-900 text-center">
+            <p class="text-[10px] text-slate-500 font-bold uppercase tracking-[0.4em] mb-4">Reliability Modeler Documentation Suite</p>
+            <p class="text-xs text-slate-600">Generated for Yoda-Man &bull; Workforce Analytics &bull; 2026</p>
+        </footer>
+    </div>
+</body>
+</html>
