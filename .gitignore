@@ -1,8 +1,25 @@
+# Python
 __pycache__/
 *.pyc
+venv/
+.env
+
+# Analysis Output & Logs
 output/
 logs/
+temp_uploads/
+temp_plots/
 tests/test_output/
+*.log
+
+# Web UI
+web/ui/node_modules/
+web/ui/.next/
+web/ui/out/
+web/ui/build/
+web/ui/.env.local
+
+# IDEs
 .vscode/
 .idea/
-*.log
+.DS_Store
