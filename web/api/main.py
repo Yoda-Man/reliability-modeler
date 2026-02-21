@@ -22,7 +22,9 @@ from modeler.data import load_failure_data, categorize_description, load_fault_c
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
 
-from pydantic import BaseModel
+# Define base directory for relative path resolution
+BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent.parent
 
 app = FastAPI(title="Reliability Modeler API")
 
@@ -42,14 +44,14 @@ class Settings(BaseModel):
     tolerance: float = 1e-6
 
 def load_persistent_settings() -> Settings:
-    settings_path = Path("settings.json")
+    settings_path = BASE_DIR / "settings.json"
     if settings_path.exists():
         with open(settings_path, "r") as f:
             return Settings(**json.load(f))
     return Settings()
 
 def save_to_archive(log_id, filename, summary):
-    log_dir = Path("output/logs")
+    log_dir = ROOT_DIR / "output" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     entry = {
         "id": log_id,
@@ -63,7 +65,7 @@ def save_to_archive(log_id, filename, summary):
 
 @app.get("/logs")
 async def get_logs():
-    log_dir = Path("output/logs")
+    log_dir = ROOT_DIR / "output" / "logs"
     if not log_dir.exists():
         return []
     
@@ -76,7 +78,8 @@ async def get_logs():
 
 @app.get("/config")
 async def get_config():
-    config_path = Path("fault_categories.conf")
+    # Priority: Local ROOT_DIR config, then Docker-style /app config
+    config_path = ROOT_DIR / "fault_categories.conf"
     if not config_path.exists():
         config_path = Path("/app/fault_categories.conf")
     
@@ -88,13 +91,13 @@ async def get_config():
 
 @app.post("/config")
 async def save_config(data: dict):
-    config_path = Path("fault_categories.conf")
+    config_path = ROOT_DIR / "fault_categories.conf"
     if "content" in data:
         with open(config_path, "w") as f:
             f.write(data["content"])
     
     if "settings" in data:
-        with open("settings.json", "w") as f:
+        with open(BASE_DIR / "settings.json", "w") as f:
             json.dump(data["settings"], f)
             
     return {"status": "success"}
@@ -104,7 +107,7 @@ async def analyze_failure_data(
     file: UploadFile = File(...),
     future_hours: float = 1000.0,
 ):
-    temp_uploads = Path("temp_uploads")
+    temp_uploads = ROOT_DIR / "temp_uploads"
     temp_uploads.mkdir(exist_ok=True)
     csv_path = temp_uploads / file.filename
     with open(csv_path, "wb") as f:
@@ -114,7 +117,7 @@ async def analyze_failure_data(
 
 @app.get("/sample-data")
 async def analyze_sample_data():
-    sample_path = Path("sample_data.csv")
+    sample_path = BASE_DIR / "sample_data.csv"
     if not sample_path.exists():
         sample_path = Path("/app/sample_data.csv")
     
@@ -126,7 +129,7 @@ async def analyze_sample_data():
 async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: float):
     try:
         settings = load_persistent_settings()
-        config_path = Path("fault_categories.conf")
+        config_path = ROOT_DIR / "fault_categories.conf"
         if not config_path.exists():
             config_path = Path("/app/fault_categories.conf")
             
@@ -149,7 +152,7 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
         fit_data = {}
 
         for m in ['go', 'mo']:
-            params, aic = fit_model(t, model=m, method=settings.optimization_method, tol=settings.tolerance)
+            params, ll, se, total_exp = fit_model(t, T, model_name=m, method=settings.optimization_method, tol=settings.tolerance)
             name = "Goel-Okumoto" if m == 'go' else "Musa-Okumoto"
             
             mu = go_mu(tt, params) if m == 'go' else mo_mu(tt, params)
@@ -159,9 +162,7 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
             curves_intensity[m] = intensity
             
             # For plot_reliability_growth which expects specific results dict
-            # results[m] = (params, ll, se, total_exp) -> we simplify or adapt
-            total_exp = params[0] if m == 'go' else None
-            fit_data[m] = (params, None, None, name) 
+            fit_data[m] = (params, ll, se, name) 
 
             param_map = {}
             if m == 'go':
@@ -169,17 +170,21 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
             else:
                 param_map = {"lambda0": params[0], "theta": params[1]}
 
+            # AIC = 2k - 2ln(L)
+            k = len(params)
+            aic = 2 * k - 2 * ll
+
             results_list.append({
                 "id": m,
                 "name": name,
                 "aic": round(aic, 4),
-                "total_expected_failures": round(total_exp, 2) if total_exp else None,
+                "total_expected_failures": round(float(total_exp), 2) if total_exp is not None else None,
                 "parameters": {k: round(float(v), 6) for k, v in param_map.items()}
             })
 
         # 3. Plots
         plots_b64 = {}
-        temp_plots = Path("temp_plots")
+        temp_plots = ROOT_DIR / "temp_plots"
         temp_plots.mkdir(exist_ok=True)
         prefix = str(temp_plots / f"plot_{datetime.now().strftime('%H%M%S')}")
 
