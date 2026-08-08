@@ -19,6 +19,7 @@ import base64
 import json
 import time
 import html as _html
+import secrets
 
 # Add the app directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.3.2")
+app = FastAPI(title="Reliability Modeler API", version="2.3.3")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -74,8 +75,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 # ── API Key Authentication (simple shared-secret for internal use) ────────────
@@ -91,7 +92,7 @@ async def api_key_middleware(request: Request, call_next):
     if request.method == "GET":
         return await call_next(request)  # GET is read-only, safe without auth
     provided = request.headers.get("X-API-Key", "")
-    if provided != API_KEY:
+    if not secrets.compare_digest(provided, API_KEY):
         logger.warning(f"Auth failed for {request.client.host if request.client else 'unknown'} on {request.method} {request.url.path}")
         return JSONResponse(status_code=401, content={"error": "Invalid or missing API key"})
     return await call_next(request)
@@ -113,9 +114,13 @@ async def rate_limit_middleware(request: Request, call_next):
         return JSONResponse(status_code=429, content={"error": "Too many requests", "retry_after": RATE_LIMIT_WINDOW})
     timestamps.append(now)
     _rate_limit_store[client_ip] = timestamps
-    # Prune expired entries from the store periodically
-    if len(_rate_limit_store) > 1000:
-        _rate_limit_store.clear()
+    # Prune expired entries periodically (keep only clients with recent activity)
+    if len(_rate_limit_store) > 500:
+        cutoff = now - (RATE_LIMIT_WINDOW * 2)
+        stale = [ip for ip, ts_list in _rate_limit_store.items()
+                  if not any(t > cutoff for t in ts_list)]
+        for ip in stale:
+            del _rate_limit_store[ip]
     response = await call_next(request)
     return response
 
@@ -292,6 +297,7 @@ async def get_html_report(analysis_id: str):
     failure_rate = round(tf / max(0.01, dh), 2)
     safe_file = _html.escape(entry.get('file', 'N/A'))
     safe_date = _html.escape(entry.get('date', 'N/A'))
+    safe_id = _html.escape(analysis_id)
 
     # Find any plots for this run
     plot_dir = ROOT_DIR / "temp_plots"
@@ -330,7 +336,7 @@ async def get_html_report(analysis_id: str):
 <body>
 <div class="header">
   <h1>🔬 Reliability Executive Report</h1>
-  <p class="meta">Analysis ID: {analysis_id} &middot; File: {safe_file} &middot; Date: {safe_date}</p>
+  <p class="meta">Analysis ID: {safe_id} &middot; File: {safe_file} &middot; Date: {safe_date}</p>
 </div>
 
 <div class="kpi-grid">
@@ -466,7 +472,7 @@ async def analyze_failure_data(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.3.2", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.3.3", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():
@@ -623,8 +629,12 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
 @app.post("/graphql")
 async def graphql_query(request: Request):
     """GraphQL endpoint for flexible failure graph queries."""
+    # Enforce body size limit
+    body_bytes = await request.body()
+    if len(body_bytes) > 256 * 1024:  # 256 KB max
+        raise HTTPException(status_code=413, detail="GraphQL query too large (max 256 KB)")
     try:
-        body = await request.json()
+        body = json.loads(body_bytes)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     
