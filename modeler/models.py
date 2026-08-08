@@ -64,7 +64,7 @@ def numerical_hessian(fun, x, args=(), eps=1e-5):
     return H
 
 
-def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10):
+def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10, maxiter=5000):
     n = len(t)
     if n < 3:
         logger.warning("Not enough data points to fit model (n < 3).")
@@ -86,7 +86,7 @@ def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10):
     best_ll, best_params = -np.inf, None
     for x0 in initials:
         res = minimize(lambda p: -loglik_func(p, t, T), x0, bounds=bounds,
-                       method=method, tol=tol)
+                       method=method, tol=tol, options={'maxiter': maxiter})
         if res.success:
             ll = loglik_func(res.x, t, T)
             if ll > best_ll:
@@ -100,8 +100,12 @@ def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10):
     try:
         neg_ll = lambda p: -loglik_func(p, t, T)
         H = numerical_hessian(neg_ll, best_params, args=(t, T))
-        cov = np.linalg.inv(H)
-        se = np.sqrt(np.diag(cov))
+        try:
+            cov = np.linalg.inv(H)
+        except np.linalg.LinAlgError:
+            logger.debug(f"Hessian singular for {model_name}, using pseudo-inverse")
+            cov = np.linalg.pinv(H)
+        se = np.sqrt(np.abs(np.diag(cov)))
     except Exception as e:
         logger.debug(f"Hessian calculation failed for {model_name}: {e}")
         se = np.full(len(best_params), np.nan)
@@ -109,6 +113,9 @@ def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10):
     if model_name == 'go':
         total_expected = best_params[0]
     else:
-        total_expected = mo_mu(1e9, best_params)  # large-t approximation
+        # Use a large time to approximate asymptotic total. For MO model,
+        # mu(inf) = (1/theta) * ln(1 + lambda0 * theta * inf) is unbounded,
+        # so we use a practical horizon of 1e6 hours (~114 years).
+        total_expected = mo_mu(1e6, best_params)
 
     return best_params, best_ll, se, total_expected

@@ -77,10 +77,11 @@ def load_failure_data(csv_path: Path, config_path: Path, start_time_str: str = N
             full_events.append((dt, desc))
         except Exception:
             errors += 1
+            logger.debug(f"Row {index}: skipping due to parse error on value '{str(row[dt_col])[:80]}'")
             continue
 
     if errors > 0:
-        logger.warning(f"Skipped {errors} rows due to parsing errors.")
+        logger.warning(f"Skipped {errors} rows ({errors/len(df)*100:.1f}% of {len(df)} total) due to parsing errors. Check timestamp format.")
 
     if not full_events:
         logger.warning("No valid data found in CSV!")

@@ -5,6 +5,46 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2025-08-08
+
+### Security
+- **Fixed path traversal** via uploaded filename — now uses UUID-based filenames.
+- **Added config validation** on POST /config — taxonomy syntax and optimizer method are validated before writing.
+- **Restricted CORS** — origins are now configurable via `ALLOWED_ORIGINS` env var, `allow_credentials` disabled.
+- **Added rate limiting** — 30 requests per 60 seconds per client IP, configurable via env vars.
+- **Sanitized error responses** — API no longer leaks internal tracebacks to clients.
+
+### Added
+- **`/health` endpoint** — returns `{"status": "ok", "version": "..."}` for load balancer probes.
+- **Structured JSON logging** — API logs include timestamps, levels, and request IDs.
+- **Request ID middleware** — every request gets an `X-Request-ID` header for correlation.
+- **Integration test suite** — 13 tests covering `/health`, `/analyze`, `/config`, `/logs`, CORS, and error cases.
+- **pytest.ini** — standard pytest configuration.
+- **SUPPORT.md** — operational runbook with troubleshooting, deployment, and escalation procedures.
+- **LICENSE** — MIT license added.
+- **`--max-iter` CLI flag** — control optimizer iteration limit.
+- **`--version` CLI flag** — prints version string.
+
+### Changed
+- **AIC formula unified** — both CLI and API now use `AIC = 2k - 2·ln(L)` via shared helper.
+- **CLI exit codes** — `sys.exit(1)` on failure instead of `return` (exit code 0).
+- **Dependency versions pinned** — all requirements now specify exact versions.
+- **docker-compose.yml** — uses pre-built images with version tags, adds health-relevant env vars.
+- **Hessian fallback** — uses pseudo-inverse when Hessian is singular (was crashing).
+- **MO asymptote** — uses 1e6 hours instead of 1e9 for numerical stability.
+- **Optimizer timeout** — added `maxiter` parameter (default 5000) to scipy minimize calls.
+- **CSV parse errors** — now include row-level detail and percentage in log warnings.
+- **Export module** — plots are generated after CSVs; failures are tracked and reported.
+
+### Fixed
+- **Cross-platform test runner** — tests now run via `python -m pytest` instead of PowerShell-only.
+- **README version** — corrected Next.js version reference (14 → 16).
+- **Removed dead `data_scrubbing` toggle** — was accepted but never implemented.
+
+### Removed
+- **`pyinstaller` from root requirements** — moved to dev-only concern.
+- **`DOCKERHUB_USERNAME` from `.env`** — no real credentials in repo.
+
 ## [2.0.0] - 2026-02-21
 
 ### Added (Web Architecture)

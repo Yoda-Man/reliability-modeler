@@ -32,6 +32,10 @@ def setup_logging(silent=False, output_dir=None):
 
     logging.basicConfig(level=logging.INFO, format=log_format, handlers=handlers)
 
+def _compute_aic_from_ll(ll: float, k: int = 2) -> float:
+    """Shared AIC calculation: AIC = 2k - 2ln(L)"""
+    return 2 * k - 2 * ll
+
 def main():
     parser = argparse.ArgumentParser(description="Reliability Growth Modeler v1.0.0")
     parser.add_argument('--csv', default='input/error_log.csv')
@@ -43,6 +47,8 @@ def main():
     parser.add_argument('--export-only', action='store_true')
     parser.add_argument('--prefix', default=None)
     parser.add_argument('--output-dir', default='output', help="Directory to save output files")
+    parser.add_argument('--max-iter', type=int, default=5000, help="Maximum iterations for optimizer")
+    parser.add_argument('--version', action='version', version='Reliability Modeler v2.0.1')
 
     args = parser.parse_args()
 
@@ -71,7 +77,7 @@ def main():
         )
     except Exception as e:
         logger.critical(f"Data loading failed: {e}")
-        return
+        sys.exit(1)
 
     t = np.sort(t)
     T = float(t[-1]) if len(t) > 0 else 0.0
@@ -92,7 +98,7 @@ def main():
         params, ll, se, total_exp = fit_model(t, T, m)
         if params is not None:
             name = "Goel-Okumoto" if m == 'go' else "Musa-Okumoto"
-            aic = 4 - 2*ll
+            aic = _compute_aic_from_ll(ll, k=2)
             logger.info(f"{name}: AIC = {aic:.2f}")
             results[m] = (params, ll, se, total_exp)
             curves[m] = go_mu(tt, params) if m == 'go' else mo_mu(tt, params)

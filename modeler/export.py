@@ -14,6 +14,9 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
     if not prefix:
         prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    generated_files = []
+    warnings = []
+
     # Parameters
     param_rows = []
     total_expected_dict = {}
@@ -26,6 +29,7 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
         })
         total_expected_dict[m] = total_exp
     pd.DataFrame(param_rows).to_csv(f"{prefix}_parameters.csv", index=False)
+    generated_files.append(f"{prefix}_parameters.csv")
 
     # Predictions & Intensity
     pred_rows = []
@@ -62,16 +66,19 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
                           'Predicted_Intensity': np.nan,
                           'CI_Lower_95pct':np.nan, 'CI_Upper_95pct':np.nan})
     pd.DataFrame(pred_rows).to_csv(f"{prefix}_predictions.csv", index=False)
+    generated_files.append(f"{prefix}_predictions.csv")
 
     # Categorized
     cat_df = pd.DataFrame(categorized_list, columns=['Original_Timestamp', 'Time_Hours', 'Categories', 'Description'])
     cat_df.to_csv(f"{prefix}_categorized.csv", index=False)
+    generated_files.append(f"{prefix}_categorized.csv")
 
     # Category trends
     cat_df['Time_Hours_Rounded'] = cat_df['Time_Hours'].round(0)
     grouped = cat_df.groupby(['Categories', 'Time_Hours_Rounded']).size().unstack(fill_value=0).cumsum(axis=1)
     trend_df = grouped.reset_index().melt(id_vars=['Categories'], var_name='Time_Hours', value_name='Cumulative_Failures')
     trend_df.to_csv(f"{prefix}_category_trends.csv", index=False)
+    generated_files.append(f"{prefix}_category_trends.csv")
 
     # Human-friendly summary
     current_failures = len(t)
@@ -114,13 +121,28 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
 
     with open(f"{prefix}_human_summary.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines))
+    generated_files.append(f"{prefix}_human_summary.txt")
     
     logger.info(f"Saved summary to {prefix}_human_summary.txt")
 
-    # Generate Plots
+    # Generate Plots — these can fail independently without blocking CSV/summary output
     plot_path = plot_reliability_growth(t, len(t), curves, results, ensemble, tt, prefix)
+    if plot_path:
+        generated_files.append(plot_path)
+    else:
+        warnings.append("Reliability growth plot failed to generate")
+
     cat_plot_path = plot_categories(categorized_list, prefix)
+    if cat_plot_path:
+        generated_files.append(cat_plot_path)
+    else:
+        warnings.append("Category plot failed to generate")
+
     intensity_plot_path = plot_failure_intensity(tt, curves_intensity, ensemble_intensity, prefix)
+    if intensity_plot_path:
+        generated_files.append(intensity_plot_path)
+    else:
+        warnings.append("Intensity plot failed to generate")
 
     print("\n".join(summary_lines))
     print(f"\nSaved files with prefix: {prefix}")
@@ -130,3 +152,8 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
     print(f"  * {prefix}_intensity_plot.png    <- failure intensity (stability) chart")
     print(f"  * {prefix}_category_plot.png     <- Visual breakdown by category")
     print("  * parameters.csv / predictions.csv / categorized.csv")
+    
+    if warnings:
+        logger.warning(f"Export completed with {len(warnings)} warning(s): {'; '.join(warnings)}")
+    
+    return generated_files, warnings

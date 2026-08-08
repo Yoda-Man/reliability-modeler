@@ -7,6 +7,13 @@ This tool transforms raw failure logs into actionable intelligence, helping mana
 *   **Predicted Residuals**: How many latent faults likely remain in the system.
 *   **Stability Trends**: When the software will reach a desired reliability threshold for release.
 
+## Maintainers
+
+- **Primary**: Reliability Engineering Team
+- **Docker Hub**: `trustaldo/reliability-modeler-api`, `trustaldo/reliability-modeler-ui`
+- **Repository**: https://github.com/Yoda-Man/reliability-modeler
+- **Contact**: For support, file an issue on the GitHub repository.
+
 ## 🚀 Key Features
 
 *   **Executive Dashboard**: High-fidelity visualizations of reliability growth and failure intensity.
@@ -28,12 +35,14 @@ The easiest way to run the Reliability Modeler is using Docker.
 
 2.  **Launch with Docker Compose**:
     ```bash
-    docker-compose up --build
+    docker-compose up
     ```
 
 3.  **Access the Application**:
     *   **Web UI**: [http://localhost:3000](http://localhost:3000)
     *   **Backend API**: [http://localhost:8000](http://localhost:8000)
+    *   **API Docs (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
+    *   **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
 
 ## 📖 Quick Start
 
@@ -52,7 +61,7 @@ The Modeler now supports granular control over the statistical fitting process:
 
 ## 📁 Project Structure
 
-*   **/web/ui**: Next.js 14 frontend (Tailwind CSS, Recharts, Lucide).
+*   **/web/ui**: Next.js 16 frontend (Tailwind CSS, Recharts, Lucide).
 *   **/web/api**: FastAPI backend wrapper.
 *   **/modeler**: The core mathematical engine (GO/MO implementations).
 *   **/output**: Persistent storage for analysis logs and generated plots.
@@ -67,10 +76,32 @@ python reliability_modeler.py --csv input/error_log.csv --model both
 
 ## 🧪 Testing
 
-```powershell
+```bash
 # Run the full test suite
-powershell -ExecutionPolicy Bypass -File tests/run_tests.ps1
+python -m pytest tests/ -v
+
+# Run only unit tests
+python -m pytest tests/unit/ -v
+
+# Run API integration tests
+python -m pytest tests/integration/ -v
 ```
+
+## 📋 API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check — returns `{"status": "ok"}` |
+| GET | `/docs` | Auto-generated OpenAPI/Swagger documentation |
+| POST | `/analyze` | Upload CSV for reliability analysis |
+| GET | `/sample-data` | Run analysis on built-in sample data |
+| GET | `/config` | Get current fault taxonomy and settings |
+| POST | `/config` | Update fault taxonomy and engine settings |
+| GET | `/logs` | List archived analysis sessions |
+
+## 🔒 Security
+
+See [SUPPORT.md](SUPPORT.md) for operational runbooks and security considerations.
 
 ---
 *Developed for excellence in software quality engineering.*

@@ -1,11 +1,10 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Settings, Sliders, Hash, Tag, FileCode, Save, Loader2, CheckCircle2, FlaskConical, Target } from 'lucide-react';
+import { Settings, Sliders, Tag, FileCode, Save, Loader2, CheckCircle2, FlaskConical, Target } from 'lucide-react';
 
 interface ConfigSettings {
     multi_label: boolean;
-    data_scrubbing: boolean;
     taxonomy_content: string;
     optimization_method: string;
     tolerance: number;
@@ -14,7 +13,6 @@ interface ConfigSettings {
 export default function ConfigView() {
     const [settings, setSettings] = useState<ConfigSettings>({
         multi_label: false,
-        data_scrubbing: true,
         taxonomy_content: '',
         optimization_method: 'L-BFGS-B',
         tolerance: 1e-10
@@ -63,7 +61,6 @@ export default function ConfigView() {
     };
 
     const toggleMultiLabel = () => setSettings(s => ({ ...s, multi_label: !s.multi_label }));
-    const toggleScrubbing = () => setSettings(s => ({ ...s, data_scrubbing: !s.data_scrubbing }));
 
     if (isLoading) {
         return (
@@ -111,7 +108,7 @@ export default function ConfigView() {
                     </div>
                 </section>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-1 gap-6">
                     <button
                         onClick={toggleMultiLabel}
                         className={`p-6 rounded-2xl border transition-all text-left flex flex-col items-start ${settings.multi_label
@@ -130,28 +127,6 @@ export default function ConfigView() {
                             </div>
                             <span className="text-[10px] font-bold uppercase text-slate-500">
                                 {settings.multi_label ? "Enabled" : "Disabled"}
-                            </span>
-                        </div>
-                    </button>
-
-                    <button
-                        onClick={toggleScrubbing}
-                        className={`p-6 rounded-2xl border transition-all text-left flex flex-col items-start ${settings.data_scrubbing
-                                ? "bg-emerald-600/10 border-emerald-500/50"
-                                : "bg-slate-900/50 border-slate-800 hover:border-slate-700"
-                            }`}
-                    >
-                        <Hash className={`w-5 h-5 mb-4 ${settings.data_scrubbing ? "text-emerald-500" : "text-slate-400"}`} />
-                        <h4 className="text-white font-semibold mb-2">Auto Data Scrubbing</h4>
-                        <p className="text-xs text-slate-400 leading-relaxed">
-                            Automatically filters out malformed timestamps or duplicate entries during ingestion.
-                        </p>
-                        <div className="mt-4 flex items-center space-x-2 text-emerald-500 font-bold text-[10px] uppercase">
-                            <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.data_scrubbing ? "bg-emerald-600" : "bg-slate-700"}`}>
-                                <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${settings.data_scrubbing ? "left-4.5" : "left-0.5"}`} />
-                            </div>
-                            <span className="text-[10px] font-bold uppercase text-slate-500">
-                                {settings.data_scrubbing ? "Enabled" : "Disabled"}
                             </span>
                         </div>
                     </button>

@@ -1,20 +1,24 @@
 services:
   api:
-    build:
-      context: .
-      dockerfile: ./web/api/Dockerfile
+    image: trustaldo/reliability-modeler-api:latest
     ports:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - ALLOWED_ORIGINS=http://localhost:3000
+    volumes:
+      - fault_categories_data:/app/fault_categories.conf.ro
+      - output_data:/app/output
 
   ui:
-    build:
-      context: ./web/ui
-      dockerfile: Dockerfile
+    image: trustaldo/reliability-modeler-ui:latest
     ports:
       - "3000:3000"
     depends_on:
       - api
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://api:8000
+
+volumes:
+  fault_categories_data:
+  output_data:
