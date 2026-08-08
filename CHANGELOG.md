@@ -5,6 +5,41 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - 2025-08-08
+
+### Security
+- **API key authentication** — `X-API-Key` header checked against `RELIABILITY_API_KEY`
+  env var. GET + /health exempt. Disabled when env var unset.
+- **Path traversal fix** — `/report/{id}/html` rejects `..`, `/`, `\` and verifies
+  resolved path stays inside log directory.
+- **Stored XSS fix** — HTML report escapes filename and date before template interpolation.
+- **GraphQL introspection disabled** — `introspection=False` on schema.
+- **Rate-limit store pruning** — auto-clears when exceeding 1000 entries (memory DoS).
+- **CORS whitespace fix** — origins from env var now stripped properly.
+
+### Changed
+- **Node 22 LTS** — Docker UI image upgraded from `node:20-alpine` to `node:22-alpine`
+  (EOL 2027 vs 2026). `@types/node` bumped to `^22`.
+- **Python 3.13** — Docker API image corrected from `python:3.14-slim` (no stable release)
+  to `python:3.13-slim`.
+- **GraphQL import** — now try/except for both package-mode and flat Docker layout.
+- **AIC formula** in export.py now uses explicit `2*2 - 2*ll` (consistent with CLI/API).
+- **Plot error handling** — exceptions now log full tracebacks (`exc_info=True`).
+- CLI argparse description corrected to v2.3.0.
+
+### Fixed
+- `/logs` pagination: limit clamped to 1-200, offset to 0-10000.
+- `settings.json` added to `.gitignore` (prevents accidental commits).
+- Dead `ContextVar` import removed from `run_analysis_pipeline`.
+- README version reference corrected to Next.js 16.1.
+
+### Added
+- Three new `fit_model` unit tests (GO convergence, MO convergence, n<3 edge case).
+- `RELIABILITY_API_KEY` documented in SUPPORT.md env vars table.
+
+### Tests
+- 18/18 pass (3 new `fit_model` tests).
+
 ## [2.3.0] - 2025-08-08
 
 ### Added

@@ -64,7 +64,7 @@ The Modeler now supports granular control over the statistical fitting process:
 
 ## 📁 Project Structure
 
-*   **/web/ui**: Next.js 16.1 frontend (Tailwind CSS, Recharts, Lucide).
+*   **/web/ui**: Next.js 16.1 frontend (Tailwind CSS, Recharts, Lucide) on Node 22 LTS.
 *   **/web/api**: FastAPI backend wrapper.
 *   **/modeler**: The core mathematical engine (GO/MO implementations).
 *   **/output**: Persistent storage for analysis logs and generated plots.

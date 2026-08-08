@@ -45,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.3.0")
+app = FastAPI(title="Reliability Modeler API", version="2.3.2")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -466,7 +466,7 @@ async def analyze_failure_data(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.3.0", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.3.2", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():
