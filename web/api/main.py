@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.0.1")
+app = FastAPI(title="Reliability Modeler API", version="2.0.2")
 
 # ── CORS ────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
@@ -219,7 +219,7 @@ async def analyze_failure_data(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.0.1", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.0.2", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():

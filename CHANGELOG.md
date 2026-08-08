@@ -5,6 +5,19 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2025-08-08
+
+### Changed
+- **Python 3.14 support** — upgraded all dependencies and Docker base image to Python 3.14.
+  - numpy 1.26.4 → 2.5.1
+  - scipy 1.13.1 → 1.18.0
+  - matplotlib 3.9.2 → 3.11.1
+  - pandas 2.2.3 → 3.0.5
+  - fastapi 0.115.6 → 0.141.1
+  - uvicorn 0.34.0 → 0.52.1
+  - pytest 8.3.4 → 9.1.1
+  - All unit tests (6/6) and full CLI pipeline pass on Python 3.14.
+
 ## [2.0.1] - 2025-08-08
 
 ### Security

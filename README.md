@@ -1,6 +1,6 @@
 # Software Reliability Growth Modeler (Web Ready)
 
-A premium, containerized web application for modeling and predicting software reliability using the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models.
+A premium, containerized web application for modeling and predicting software reliability using the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models. Built for **Python 3.14+**.
 
 This tool transforms raw failure logs into actionable intelligence, helping management estimate:
 *   **MTBF Evolution**: Current and projected system reliability.
