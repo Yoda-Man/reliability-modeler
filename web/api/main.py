@@ -26,6 +26,8 @@ sys.path.append("/app")
 from modeler.data import load_failure_data, categorize_description, load_fault_categories
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
+from modeler.graphs import build_failure_graphs, generate_graph_insights
+from .graphql_schema import schema, store_analysis_data
 
 # Define base directory for relative path resolution
 BASE_DIR = Path(__file__).resolve().parent
@@ -375,6 +377,29 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
             "duration_hours": round(T, 2)
         })
 
+        # Store categorized data for GraphQL graph queries
+        store_analysis_data(log_id, categorized)
+
+        # 5. Build graph analytics (non-blocking — returns None if networkx missing)
+        graph_report = build_failure_graphs(categorized)
+        graph_insights = generate_graph_insights(graph_report) if graph_report else []
+        graph_summary = None
+        if graph_report:
+            graph_summary = {
+                "keystone_categories": [
+                    {"name": c.node, "pagerank": c.pagerank, "is_bridge": c.is_bridge}
+                    for c in graph_report.centrality if c.is_keystone
+                ],
+                "top_cascade": (
+                    {"chain": " → ".join(graph_report.cascade_chains[0].chain),
+                     "confidence": graph_report.cascade_chains[0].confidence}
+                    if graph_report.cascade_chains else None
+                ),
+                "num_communities": graph_report.metrics.num_communities,
+                "graph_density": graph_report.metrics.graph_density,
+                "graph_json": graph_report.graph_json,
+            }
+
         return {
             "id": log_id,
             "summary": {
@@ -384,7 +409,9 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
             },
             "models": results_list,
             "plots": plots_b64,
-            "categorized_failures": categorized[:100]
+            "categorized_failures": categorized[:100],
+            "graph_insights": graph_insights,
+            "graph_report": graph_summary,
         }
     except HTTPException:
         raise
@@ -397,6 +424,32 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
                 csv_path.unlink()
             except Exception:
                 pass
+
+@app.post("/graphql")
+async def graphql_query(request: Request):
+    """GraphQL endpoint for flexible failure graph queries."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    query_str = body.get("query", "")
+    variables = body.get("variables", {})
+    
+    if not query_str:
+        raise HTTPException(status_code=400, detail="Missing 'query' field")
+    
+    try:
+        result = schema.execute(query_str, variable_values=variables)
+    except Exception as e:
+        logger.error(f"GraphQL execution error: {e}")
+        raise HTTPException(status_code=500, detail="GraphQL query execution failed")
+    
+    if result.errors:
+        return {"data": result.data, "errors": [str(e) for e in result.errors]}
+    
+    return {"data": result.data}
+
 
 if __name__ == "__main__":
     import uvicorn

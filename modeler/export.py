@@ -6,6 +6,7 @@ from collections import Counter
 import logging
 from .plots import plot_reliability_growth, plot_categories, plot_failure_intensity
 from .models import go_intensity, mo_intensity
+from .graphs import build_failure_graphs, generate_graph_insights
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,19 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
     generated_files.append(f"{prefix}_human_summary.txt")
     
     logger.info(f"Saved summary to {prefix}_human_summary.txt")
+
+    # ── Graph Insights (non-blocking — graceful if networkx missing) ──────
+    try:
+        graph_report = build_failure_graphs(categorized_list)
+        if graph_report:
+            graph_lines = generate_graph_insights(graph_report)
+            summary_lines.extend(["\n"] + graph_lines)
+            # Rewrite summary with graph insights appended
+            with open(f"{prefix}_human_summary.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(summary_lines))
+            logger.info("Graph analytics appended to summary")
+    except Exception as e:
+        logger.debug(f"Graph analytics skipped: {e}")
 
     # Generate Plots — these can fail independently without blocking CSV/summary output
     plot_path = plot_reliability_growth(t, len(t), curves, results, ensemble, tt, prefix)
