@@ -26,7 +26,7 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
         param_rows.append({
             'Model': name, 'Param1': params[0], 'Param2': params[1] if len(params)>1 else np.nan,
             'Param1_SE': se[0] if len(se)>0 else np.nan, 'Param2_SE': se[1] if len(se)>1 else np.nan,
-            'LogLikelihood': ll, 'AIC': 4 - 2*ll if ll is not None else np.nan
+            'LogLikelihood': ll, 'AIC': 2*2 - 2*ll if ll is not None else np.nan
         })
         total_expected_dict[m] = total_exp
     pd.DataFrame(param_rows).to_csv(f"{prefix}_parameters.csv", index=False)

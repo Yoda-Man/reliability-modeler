@@ -18,6 +18,7 @@ from datetime import datetime
 import base64
 import json
 import time
+import html as _html
 
 # Add the app directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -27,7 +28,10 @@ from modeler.data import load_failure_data, categorize_description, load_fault_c
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
 from modeler.graphs import build_failure_graphs, generate_graph_insights
-from .graphql_schema import schema, store_analysis_data
+try:
+    from .graphql_schema import schema, store_analysis_data
+except ImportError:
+    from graphql_schema import schema, store_analysis_data
 
 # Define base directory for relative path resolution
 BASE_DIR = Path(__file__).resolve().parent
@@ -65,7 +69,7 @@ _warn_ephemeral_storage()
 
 
 # ── CORS ────────────────────────────────────────────────────────────────────
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -73,6 +77,25 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+# ── API Key Authentication (simple shared-secret for internal use) ────────────
+API_KEY = os.getenv("RELIABILITY_API_KEY", "")
+AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json"}
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if not API_KEY:
+        return await call_next(request)  # auth disabled if no key configured
+    if request.url.path in AUTH_EXEMPT_PATHS or request.url.path.startswith("/health"):
+        return await call_next(request)
+    if request.method == "GET":
+        return await call_next(request)  # GET is read-only, safe without auth
+    provided = request.headers.get("X-API-Key", "")
+    if provided != API_KEY:
+        logger.warning(f"Auth failed for {request.client.host if request.client else 'unknown'} on {request.method} {request.url.path}")
+        return JSONResponse(status_code=401, content={"error": "Invalid or missing API key"})
+    return await call_next(request)
+
 
 # ── Rate Limiting (simple in-memory) ─────────────────────────────────────────
 _rate_limit_store: dict[str, list] = {}
@@ -90,6 +113,9 @@ async def rate_limit_middleware(request: Request, call_next):
         return JSONResponse(status_code=429, content={"error": "Too many requests", "retry_after": RATE_LIMIT_WINDOW})
     timestamps.append(now)
     _rate_limit_store[client_ip] = timestamps
+    # Prune expired entries from the store periodically
+    if len(_rate_limit_store) > 1000:
+        _rate_limit_store.clear()
     response = await call_next(request)
     return response
 
@@ -137,6 +163,8 @@ def save_to_archive(log_id, filename, summary):
 
 @app.get("/logs")
 async def get_logs(limit: int = 50, offset: int = 0):
+    limit = max(1, min(limit, 200))
+    offset = max(0, min(offset, 10000))
     log_dir = ROOT_DIR / "output" / "logs"
     if not log_dir.exists():
         return {"total": 0, "logs": []}
@@ -241,8 +269,16 @@ async def get_html_report(analysis_id: str):
     Generate a self-contained, print-ready HTML executive report for an analysis run.
     This file can be saved and emailed by any external scheduler (cron, CI, etc.).
     """
+    # Sanitize: reject path traversal attempts
+    if '..' in analysis_id or '/' in analysis_id or '\\' in analysis_id:
+        raise HTTPException(status_code=400, detail="Invalid analysis ID")
+
     log_dir = ROOT_DIR / "output" / "logs"
     log_path = log_dir / f"{analysis_id}.json"
+    # Resolve and verify the path stays inside log_dir
+    resolved = log_path.resolve()
+    if not str(resolved).startswith(str(log_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid analysis ID")
     if not log_path.exists():
         raise HTTPException(status_code=404, detail=f"Analysis {analysis_id} not found")
 
@@ -254,6 +290,8 @@ async def get_html_report(analysis_id: str):
     dh = summary.get("duration_hours", 0)
     mtbf = round(dh / max(1, tf), 2)
     failure_rate = round(tf / max(0.01, dh), 2)
+    safe_file = _html.escape(entry.get('file', 'N/A'))
+    safe_date = _html.escape(entry.get('date', 'N/A'))
 
     # Find any plots for this run
     plot_dir = ROOT_DIR / "temp_plots"
@@ -292,7 +330,7 @@ async def get_html_report(analysis_id: str):
 <body>
 <div class="header">
   <h1>🔬 Reliability Executive Report</h1>
-  <p class="meta">Analysis ID: {analysis_id} &middot; File: {entry.get('file', 'N/A')} &middot; Date: {entry.get('date', 'N/A')}</p>
+  <p class="meta">Analysis ID: {analysis_id} &middot; File: {safe_file} &middot; Date: {safe_date}</p>
 </div>
 
 <div class="kpi-grid">
@@ -446,7 +484,6 @@ def _compute_aic(ll: float, k: int) -> float:
     return 2 * k - 2 * ll
 
 async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: float):
-    req_id = getattr(getattr(__import__('contextvars').ContextVar('_'), '__default__', None), None) if False else None
     try:
         settings = load_persistent_settings()
         if settings.optimization_method not in VALID_OPTIMIZATION_METHODS:

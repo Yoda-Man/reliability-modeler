@@ -4,6 +4,10 @@ __pycache__/
 venv/
 .env
 
+# Runtime config (prevent accidental commits)
+settings.json
+web/api/settings.json
+
 # Analysis Output & Logs
 output/
 logs/

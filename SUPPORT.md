@@ -160,6 +160,7 @@ curl http://localhost:3000  # Should return HTML
 | Variable | Service | Default | Description |
 |----------|---------|---------|-------------|
 | `ALLOWED_ORIGINS` | API | `http://localhost:3000` | Comma-separated CORS origins |
+| `RELIABILITY_API_KEY` | API | (empty = disabled) | Shared secret for POST/PUT/DELETE auth |
 | `RATE_LIMIT_MAX` | API | `30` | Max requests per window |
 | `RATE_LIMIT_WINDOW` | API | `60` | Rate limit window (seconds) |
 | `NEXT_PUBLIC_API_URL` | UI | `http://localhost:8000` | API base URL |

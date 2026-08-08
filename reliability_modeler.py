@@ -37,7 +37,7 @@ def _compute_aic_from_ll(ll: float, k: int = 2) -> float:
     return 2 * k - 2 * ll
 
 def main():
-    parser = argparse.ArgumentParser(description="Reliability Growth Modeler v1.0.0")
+    parser = argparse.ArgumentParser(description="Reliability Growth Modeler v2.3.0")
     parser.add_argument('--csv', default='input/error_log.csv')
     parser.add_argument('--config', default='fault_categories.conf')
     parser.add_argument('--model', choices=['go','mo','both'], default='both')

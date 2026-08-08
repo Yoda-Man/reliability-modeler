@@ -31,7 +31,7 @@ def plot_reliability_growth(t, n, curves, results, ensemble, tt, prefix):
         logger.info(f"Saved reliability plot to {plot_path}")
         return plot_path
     except Exception as e:
-        logger.error(f"Failed to plot reliability growth: {e}")
+        logger.error(f"Failed to plot reliability growth: {e}", exc_info=True)
         return None
 
 
@@ -59,7 +59,7 @@ def plot_failure_intensity(tt, curves_intensity, ensemble_intensity, prefix):
         logger.info(f"Saved intensity plot to {plot_path}")
         return plot_path
     except Exception as e:
-        logger.error(f"Failed to plot failure intensity: {e}")
+        logger.error(f"Failed to plot failure intensity: {e}", exc_info=True)
         return None
 
 def plot_categories(categorized_list, prefix):
@@ -133,5 +133,5 @@ def plot_categories(categorized_list, prefix):
             return cat_plot_path
             
     except Exception as e:
-        logger.error(f"Failed to create category plot: {e}")
+        logger.error(f"Failed to create category plot: {e}", exc_info=True)
         return None

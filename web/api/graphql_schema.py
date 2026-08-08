@@ -185,4 +185,4 @@ def _get_categorized_data(info, analysis_id: str) -> Optional[list]:
     return _analysis_store.get(analysis_id)
 
 
-schema = graphene.Schema(query=Query)
+schema = graphene.Schema(query=Query, introspection=False)
