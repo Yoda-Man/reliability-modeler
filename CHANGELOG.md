@@ -5,6 +5,38 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2025-08-08
+
+### Added
+- **Interactive Recharts dashboard** — category bar chart, MTBF trend area chart,
+  risk bubble chart (failure count × centrality), all with hover/tooltip support.
+- **Fault Network Intelligence panel** — keystone categories with PageRank scores,
+  top cascade chain, community count, and graph density surfaced in the UI.
+- **Risk Landscape bubble chart** — ScatterChart plotting categories by failure
+  count (y-axis) × graph centrality (x-axis), bubble size = impact score.
+- **MTBF Trend chart** — rolling-window MTBF over time using ComposedChart with
+  area fill, showing whether reliability is improving or degrading.
+- **5-KPI row** — added Failure Rate (failures/hour) as a fifth KPI card.
+
+### Changed
+- **Dashboard completely rewritten** — Recharts now renders interactive charts
+  (BarChart, ScatterChart, ComposedChart, AreaChart) instead of only static PNGs.
+- Model comparison panel now integrated alongside Graph Insight card.
+- Recent failures list increased to 50 items with improved formatting.
+- PNG plots retained as high-quality fallback for reliability growth and intensity.
+
+## [2.1.0] - 2025-08-08
+
+### Added
+- **NetworkX graph analytics engine** (`modeler/graphs.py`): co-occurrence graph,
+  temporal-proximity fallback, cascade graph, PageRank/betweenness centrality,
+  Louvain community detection, cascade chain DFS extraction.
+- **Graphene GraphQL endpoint** (`POST /graphql`): typed schema for querying
+  failure graph data — `failureGraph`, `keystoneCategories`, `cascadeChains`.
+- **Graph insights in export** — human_summary.txt now includes keystone
+  categories, cascade chains, communities, and graph health metrics.
+- 9 new unit tests for graph module (15/15 pass total).
+
 ## [2.0.2] - 2025-08-08
 
 ### Changed
