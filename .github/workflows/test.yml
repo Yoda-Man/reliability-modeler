@@ -1,0 +1,73 @@
+name: Test & Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-python:
+    name: Python Tests (3.14)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r web/api/requirements.txt
+
+      - name: Run unit tests
+        run: python -m pytest tests/unit/ -v --tb=short
+
+      - name: Verify CLI
+        run: |
+          python reliability_modeler.py --help
+          python reliability_modeler.py --version
+
+  test-api:
+    name: API Integration Tests
+    runs-on: ubuntu-latest
+    needs: test-python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r web/api/requirements.txt
+          pip install requests
+
+      - name: Start API server
+        run: |
+          cd web/api
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          sleep 5
+          curl -s http://localhost:8000/health
+
+      - name: Run integration tests
+        run: python -m pytest tests/integration/ -v --tb=short
+        env:
+          RELIABILITY_API_URL: http://localhost:8000
+
+  build-docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: test-python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -f web/api/Dockerfile -t reliability-modeler-api:ci .
+
+      - name: Build UI image
+        run: docker build -f web/ui/Dockerfile -t reliability-modeler-ui:ci ./web/ui

@@ -153,11 +153,21 @@ class TestConfigEndpoint:
 class TestLogsEndpoint:
     """Test the /logs endpoint."""
 
-    def test_logs_returns_array(self):
+    def test_logs_returns_paginated_response(self):
         r = requests.get(f"{API_URL}/logs", timeout=5)
         assert r.status_code == 200
         data = r.json()
-        assert isinstance(data, list)
+        assert isinstance(data, dict)
+        assert "total" in data
+        assert "logs" in data
+        assert isinstance(data["logs"], list)
+        assert isinstance(data["total"], int)
+
+    def test_logs_pagination_respects_limit(self):
+        r = requests.get(f"{API_URL}/logs?limit=3&offset=0", timeout=5)
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["logs"]) <= 3
 
 
 @pytest.mark.skipif(not _api_available(), reason="API not available on {API_URL}".format(API_URL=API_URL))

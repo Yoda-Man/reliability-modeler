@@ -1,6 +1,9 @@
 # Software Reliability Growth Modeler (Web Ready)
 
-A premium, containerized web application for modeling and predicting software reliability using the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models. Built for **Python 3.14+**.
+A premium, **internal-use** containerized web application for modeling and predicting software reliability using the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models. Built for **Python 3.14+**.
+
+> **⚠️ Design Decision — Internal Network Only**
+> This application is designed for **internal/VPN deployment only**. It intentionally omits user authentication, TLS termination, and internet-facing security hardening. Deploy it behind your organization's network boundary, VPN, or reverse proxy. Do not expose it directly to the public internet.
 
 This tool transforms raw failure logs into actionable intelligence, helping management estimate:
 *   **MTBF Evolution**: Current and projected system reliability.

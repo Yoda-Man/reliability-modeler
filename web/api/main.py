@@ -41,6 +41,27 @@ logger = logging.getLogger("api")
 
 app = FastAPI(title="Reliability Modeler API", version="2.0.2")
 
+
+# ── Startup config persistence check ─────────────────────────────────────────
+def _warn_ephemeral_storage():
+    """Log a warning if config files are on potentially ephemeral storage."""
+    config_path = ROOT_DIR / "fault_categories.conf"
+    settings_path = BASE_DIR / "settings.json"
+    for path, name in [(config_path, "fault_categories.conf"), (settings_path, "settings.json")]:
+        parent = path.parent
+        if not any(parent.iterdir()):
+            continue  # parent doesn't exist yet, will be created
+        # Check if parent is a known ephemeral location
+        ephemeral_markers = ["/tmp", "/var/tmp", "temp_"]
+        if any(m in str(parent) for m in ephemeral_markers):
+            logger.warning(f"⚠️  {name} is on ephemeral storage ({parent}). "
+                           f"Config changes will be LOST on container restart. "
+                           f"Mount a persistent volume at {parent}.")
+
+
+_warn_ephemeral_storage()
+
+
 # ── CORS ────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
@@ -113,17 +134,45 @@ def save_to_archive(log_id, filename, summary):
         json.dump(entry, f)
 
 @app.get("/logs")
-async def get_logs():
+async def get_logs(limit: int = 50, offset: int = 0):
     log_dir = ROOT_DIR / "output" / "logs"
     if not log_dir.exists():
-        return []
+        return {"total": 0, "logs": []}
     
-    logs = []
+    all_logs = []
     for log_file in log_dir.glob("*.json"):
-        with open(log_file, "r") as f:
-            logs.append(json.load(f))
+        try:
+            with open(log_file, "r") as f:
+                all_logs.append(json.load(f))
+        except Exception:
+            continue
     
-    return sorted(logs, key=lambda x: x['date'], reverse=True)
+    all_logs.sort(key=lambda x: x.get('date', ''), reverse=True)
+    total = len(all_logs)
+    page = all_logs[offset:offset + limit]
+    
+    return {"total": total, "logs": page}
+
+
+@app.post("/logs/prune")
+async def prune_logs(retention_days: int = 90):
+    """Delete log archives older than `retention_days` days. Default 90."""
+    log_dir = ROOT_DIR / "output" / "logs"
+    if not log_dir.exists():
+        return {"pruned": 0, "message": "No log directory found"}
+    
+    cutoff = datetime.now().timestamp() - (retention_days * 86400)
+    pruned = 0
+    for log_file in log_dir.glob("*.json"):
+        try:
+            if log_file.stat().st_mtime < cutoff:
+                log_file.unlink()
+                pruned += 1
+        except Exception:
+            continue
+    
+    logger.info(f"Pruned {pruned} log files older than {retention_days} days")
+    return {"pruned": pruned, "message": f"Removed {pruned} log(s) older than {retention_days} days"}
 
 @app.get("/config")
 async def get_config():

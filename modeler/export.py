@@ -103,7 +103,15 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
 
     if results:
         best_model = min(results, key=lambda k: 4 - 2*results[k][1])  # lowest AIC
-        best_total = total_expected_dict[best_model]
+        # Use the practical forecast horizon, not the asymptotic total, to bound expectations.
+        # The MO model is unbounded (logarithmic), so "best_total" can be misleadingly large.
+        if ensemble is not None:
+            practical_total = round(float(np.interp(max(5000, T * 1.6), tt, ensemble)))
+            total_remaining = max(0, practical_total - current_failures)
+        else:
+            best_total = total_expected_dict.get(best_model, current_failures)
+            total_remaining = max(0, int(best_total) - current_failures)
+
         cat_counts = Counter()
         for row in categorized_list:
             cats = row[2].split(", ")
@@ -111,12 +119,13 @@ def export_and_summarize(results, tt, curves, observed_times, observed_cum, ense
                 cat_counts[c] += 1
         total_seen = sum(cat_counts.values())
 
-        if total_seen > 0:
+        if total_seen > 0 and total_remaining > 0:
             summary_lines.append("Biggest problem areas (rough estimate):")
             for cat, count in cat_counts.most_common(5):
-                proportion = count / total_seen
-                remaining = round(proportion * max(0, best_total - current_failures))
+                proportion = count / current_failures if current_failures > 0 else 0
+                remaining = min(round(proportion * total_remaining), total_remaining)
                 summary_lines.append(f"  * {cat}: {count} so far -> roughly {remaining} more to find")
+            summary_lines.append(f"\n  (Total estimated remaining across all categories: ~{total_remaining} failures)")
             summary_lines.append("")
 
     with open(f"{prefix}_human_summary.txt", "w", encoding="utf-8") as f:

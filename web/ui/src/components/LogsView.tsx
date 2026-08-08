@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { History, FileText, Download, Calendar, Search, Loader2 } from 'lucide-react';
+import { History, FileText, Calendar, Search, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
+
+const PAGE_SIZE = 50;
 
 interface LogEntry {
     id: string;
@@ -14,21 +16,27 @@ interface LogEntry {
     };
 }
 
+interface LogsResponse {
+    total: number;
+    logs: LogEntry[];
+}
+
 export default function LogsView() {
-    const [logs, setLogs] = useState<LogEntry[]>([]);
+    const [data, setData] = useState<LogsResponse>({ total: 0, logs: [] });
     const [isLoading, setIsLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
+    const [offset, setOffset] = useState(0);
 
-    useEffect(() => {
-        fetchLogs();
-    }, []);
-
-    const fetchLogs = async () => {
+    const fetchLogs = async (newOffset: number = 0) => {
+        setIsLoading(true);
         try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/logs`);
+            const response = await fetch(
+                `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/logs?limit=${PAGE_SIZE}&offset=${newOffset}`
+            );
             if (response.ok) {
-                const data = await response.json();
-                setLogs(data);
+                const json: LogsResponse = await response.json();
+                setData(json);
+                setOffset(newOffset);
             }
         } catch (error) {
             console.error('Failed to fetch logs:', error);
@@ -37,7 +45,14 @@ export default function LogsView() {
         }
     };
 
-    const filteredLogs = logs.filter(log =>
+    useEffect(() => {
+        fetchLogs(0);
+    }, []);
+
+    const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
+
+    const filteredLogs = data.logs.filter(log =>
         log.file.toLowerCase().includes(searchQuery.toLowerCase()) ||
         log.id.toLowerCase().includes(searchQuery.toLowerCase())
     );
@@ -56,7 +71,11 @@ export default function LogsView() {
             <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
                 <div>
                     <h2 className="text-3xl font-bold text-white mb-2 tracking-tight">Analysis Archive</h2>
-                    <p className="text-slate-400 text-sm">Review and compare past reliability assessments performed by the engine.</p>
+                    <p className="text-slate-400 text-sm">
+                        {data.total > 0
+                            ? `${data.total} total analyses · showing ${offset + 1}–${Math.min(offset + PAGE_SIZE, data.total)}`
+                            : 'Review and compare past reliability assessments.'}
+                    </p>
                 </div>
 
                 <div className="relative">
@@ -124,6 +143,31 @@ export default function LogsView() {
                     </div>
                 )}
             </div>
+
+            {/* Pagination Controls */}
+            {data.total > PAGE_SIZE && (
+                <div className="flex items-center justify-between mt-4 px-2">
+                    <span className="text-xs text-slate-500">
+                        Page {currentPage} of {totalPages}
+                    </span>
+                    <div className="flex space-x-2">
+                        <button
+                            onClick={() => fetchLogs(Math.max(0, offset - PAGE_SIZE))}
+                            disabled={offset === 0}
+                            className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        >
+                            <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                            onClick={() => fetchLogs(offset + PAGE_SIZE)}
+                            disabled={offset + PAGE_SIZE >= data.total}
+                            className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        >
+                            <ChevronRight className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

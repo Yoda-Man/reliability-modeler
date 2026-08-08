@@ -17,9 +17,54 @@ The Reliability Modeler is a two-tier containerized application:
                                     └──────────┘
 ```
 
-- **API**: Python 3.11+ FastAPI server. CPU-bound (scipy optimization, matplotlib rendering).
+- **API**: Python 3.14+ FastAPI server. CPU-bound (scipy optimization, matplotlib rendering).
 - **UI**: Next.js 16 static + client-rendered SPA. Talks to API exclusively.
 - **No database**: State is file-based (JSON log archives, settings.json, fault_categories.conf).
+
+### ⚠️ Critical: Config Persistence
+
+`fault_categories.conf` and `settings.json` are written to the API container's local filesystem. **If the container restarts without a persistent volume, ALL configuration changes are lost.**
+
+| Deployment | What you need |
+|------------|---------------|
+| **Docker Compose** | Mount a volume: `volumes: - ./config:/app` (see `docker-compose.yml`) |
+| **Kubernetes** | Create a `PersistentVolumeClaim` and mount it at `/app` in the API pod |
+| **Bare metal** | Set `FAULT_CATEGORIES_PATH` and `SETTINGS_PATH` env vars pointing to persistent storage |
+
+**Kubernetes example:**
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: reliability-modeler-config
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: trustaldo/reliability-modeler-api:latest
+        volumeMounts:
+        - name: config
+          mountPath: /app
+        env:
+        - name: FAULT_CATEGORIES_PATH
+          value: /app/fault_categories.conf
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: reliability-modeler-config
+```
+
+The startup banner in the API logs will warn if write targets are on ephemeral storage. Check `docker logs` after deploy.
 
 ## 2. Common Failure Modes & Remedies
 
