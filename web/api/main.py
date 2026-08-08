@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.2.0")
+app = FastAPI(title="Reliability Modeler API", version="2.3.0")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -176,6 +176,164 @@ async def prune_logs(retention_days: int = 90):
     logger.info(f"Pruned {pruned} log files older than {retention_days} days")
     return {"pruned": pruned, "message": f"Removed {pruned} log(s) older than {retention_days} days"}
 
+
+@app.get("/trends")
+async def get_trends():
+    """
+    Compare MTBF, failure rate, and total failures across all archived analysis runs.
+    Returns time-series data suitable for trend-line charts.
+    """
+    log_dir = ROOT_DIR / "output" / "logs"
+    if not log_dir.exists():
+        return {"runs": [], "trend": "insufficient_data"}
+
+    runs = []
+    for log_file in sorted(log_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+        try:
+            with open(log_file, "r") as f:
+                entry = json.load(f)
+        except Exception:
+            continue
+        summary = entry.get("summary", {})
+        tf = summary.get("total_failures", 0)
+        dh = summary.get("duration_hours", 0)
+        if tf > 0 and dh > 0:
+            runs.append({
+                "id": entry.get("id", log_file.stem),
+                "date": entry.get("date", ""),
+                "file": entry.get("file", ""),
+                "total_failures": tf,
+                "duration_hours": round(dh, 2),
+                "mtbf_hours": round(dh / tf, 4),
+                "failure_rate_per_hour": round(tf / dh, 4),
+            })
+
+    if len(runs) < 2:
+        return {"runs": runs, "trend": "insufficient_data" if len(runs) == 0 else "single_run"}
+
+    # Compute trend direction for MTBF
+    first_mtbf = runs[0]["mtbf_hours"]
+    last_mtbf = runs[-1]["mtbf_hours"]
+    if last_mtbf > first_mtbf * 1.05:
+        trend = "improving"
+    elif last_mtbf < first_mtbf * 0.95:
+        trend = "degrading"
+    else:
+        trend = "stable"
+
+    # Compute % change
+    mtbf_change_pct = round((last_mtbf - first_mtbf) / max(0.001, first_mtbf) * 100, 1)
+    rate_change_pct = round((runs[-1]["failure_rate_per_hour"] - runs[0]["failure_rate_per_hour"])
+                             / max(0.001, runs[0]["failure_rate_per_hour"]) * 100, 1)
+
+    return {
+        "runs": runs,
+        "trend": trend,
+        "mtbf_change_pct": mtbf_change_pct,
+        "rate_change_pct": rate_change_pct,
+        "num_runs": len(runs),
+    }
+
+
+@app.get("/report/{analysis_id}/html")
+async def get_html_report(analysis_id: str):
+    """
+    Generate a self-contained, print-ready HTML executive report for an analysis run.
+    This file can be saved and emailed by any external scheduler (cron, CI, etc.).
+    """
+    log_dir = ROOT_DIR / "output" / "logs"
+    log_path = log_dir / f"{analysis_id}.json"
+    if not log_path.exists():
+        raise HTTPException(status_code=404, detail=f"Analysis {analysis_id} not found")
+
+    with open(log_path, "r") as f:
+        entry = json.load(f)
+
+    summary = entry.get("summary", {})
+    tf = summary.get("total_failures", 0)
+    dh = summary.get("duration_hours", 0)
+    mtbf = round(dh / max(1, tf), 2)
+    failure_rate = round(tf / max(0.01, dh), 2)
+
+    # Find any plots for this run
+    plot_dir = ROOT_DIR / "temp_plots"
+    reliability_b64 = ""
+    if plot_dir.exists():
+        for png in sorted(plot_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+            with open(png, "rb") as pf:
+                reliability_b64 = base64.b64encode(pf.read()).decode("utf-8")
+            break
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reliability Executive Report — {analysis_id}</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: #1e293b; max-width: 800px; margin: 0 auto; padding: 40px 20px; }}
+  .header {{ border-bottom: 3px solid #3b82f6; padding-bottom: 16px; margin-bottom: 32px; }}
+  .header h1 {{ font-size: 24px; color: #0f172a; }}
+  .header .meta {{ font-size: 12px; color: #64748b; margin-top: 4px; }}
+  .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }}
+  .kpi {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; text-align: center; }}
+  .kpi .value {{ font-size: 28px; font-weight: 700; color: #0f172a; }}
+  .kpi .label {{ font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }}
+  .section {{ margin-bottom: 32px; }}
+  .section h2 {{ font-size: 16px; color: #334155; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px; }}
+  .section p {{ font-size: 13px; line-height: 1.7; color: #475569; }}
+  .chart-container {{ text-align: center; }}
+  .chart-container img {{ max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; }}
+  .footer {{ border-top: 1px solid #e2e8f0; padding-top: 16px; font-size: 11px; color: #94a3b8; text-align: center; }}
+  @media print {{ body {{ padding: 20px; }} .kpi-grid {{ grid-template-columns: repeat(4, 1fr); }} }}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🔬 Reliability Executive Report</h1>
+  <p class="meta">Analysis ID: {analysis_id} &middot; File: {entry.get('file', 'N/A')} &middot; Date: {entry.get('date', 'N/A')}</p>
+</div>
+
+<div class="kpi-grid">
+  <div class="kpi"><div class="value">{tf}</div><div class="label">Total Failures</div></div>
+  <div class="kpi"><div class="value">{mtbf}h</div><div class="label">MTBF</div></div>
+  <div class="kpi"><div class="value">{failure_rate}/h</div><div class="label">Failure Rate</div></div>
+  <div class="kpi"><div class="value">{dh}h</div><div class="label">Duration</div></div>
+</div>
+
+<div class="section">
+  <h2>Executive Summary</h2>
+  <p>
+    This report presents the results of a software reliability growth analysis
+    conducted on <strong>{dh:.1f} hours</strong> of failure data containing
+    <strong>{tf} incidents</strong>. The Mean Time Between Failures (MTBF) is
+    <strong>{mtbf} hours</strong> with a failure rate of
+    <strong>{failure_rate} failures per hour</strong>.
+  </p>
+  <p style="margin-top: 12px;">
+    This report was generated by the Reliability Modeler — an internal-use tool
+    for software quality engineering. For operational questions, refer to the
+    <code>SUPPORT.md</code> runbook in the project repository.
+  </p>
+</div>
+
+{f'''<div class="section">
+  <h2>Reliability Growth Chart</h2>
+  <div class="chart-container">
+    <img src="data:image/png;base64,{reliability_b64}" alt="Reliability Growth" />
+  </div>
+</div>''' if reliability_b64 else ''}
+
+<div class="footer">
+  Reliability Modeler &middot; Internal Use Only &middot; Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC
+</div>
+</body>
+</html>"""
+
+    return {"html": html, "analysis_id": analysis_id}
+
+
 @app.get("/config")
 async def get_config():
     # Priority: Local ROOT_DIR config, then Docker-style /app config
@@ -270,7 +428,7 @@ async def analyze_failure_data(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.2.0", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.3.0", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():

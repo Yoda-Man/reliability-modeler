@@ -9,7 +9,7 @@ import {
 import {
     Activity, TrendingDown, AlertTriangle, CheckCircle, Download,
     Maximize2, HelpCircle, Clock, Target, Zap, Network, ChevronDown,
-    ChevronUp, FileText
+    ChevronUp, FileText, CalendarClock
 } from 'lucide-react';
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -85,6 +85,27 @@ function buildTimeSeries(categorized: any[]) {
     const sortedHours = Object.keys(buckets).map(Number).sort((a, b) => a - b);
     return sortedHours.map(h => ({ hour: h, ...buckets[h] }));
 }
+
+function buildHeatmapData(categorized: any[]) {
+    // Build hour-of-day × day-of-week heatmap from ISO timestamps in row[0]
+    const grid: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+    let total = 0;
+    for (const row of categorized) {
+        try {
+            const dt = new Date(row[0]);
+            if (isNaN(dt.getTime())) continue;
+            const day = dt.getDay(); // 0=Sun, 6=Sat
+            const hour = dt.getHours();
+            grid[day][hour]++;
+            total++;
+        } catch { continue; }
+    }
+    const maxVal = Math.max(1, ...grid.flat());
+    return { grid, maxVal, total };
+}
+
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const HOUR_LABELS = Array.from({ length: 24 }, (_, i) => `${i}h`);
 
 function computeMTBFOverTime(categorized: any[], windowSize: number = 10) {
     const points: Array<{ hour: number; mtbf: number; failures: number }> = [];
@@ -288,6 +309,78 @@ function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: any[]; 
     );
 }
 
+function FailureHeatmap({ categorized }: { categorized: any[] }) {
+    const { grid, maxVal, total } = useMemo(() => buildHeatmapData(categorized), [categorized]);
+    if (total === 0) {
+        return (
+            <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl flex items-center justify-center h-64">
+                <p className="text-xs text-slate-500">No timestamp data available for heatmap.</p>
+            </div>
+        );
+    }
+    const intensity = (val: number) => {
+        if (val === 0) return 'bg-slate-900/80';
+        const pct = val / maxVal;
+        if (pct < 0.2) return 'bg-blue-950/60';
+        if (pct < 0.4) return 'bg-blue-900/70';
+        if (pct < 0.6) return 'bg-blue-700/80';
+        if (pct < 0.8) return 'bg-orange-600/80';
+        return 'bg-red-600/90';
+    };
+
+    return (
+        <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl">
+            <h3 className="text-sm font-semibold text-white mb-4 flex items-center space-x-2">
+                <CalendarClock className="w-4 h-4 text-amber-400" />
+                <span>Failure Heatmap</span>
+                <span className="text-[10px] text-slate-500 font-normal">day of week × hour of day</span>
+                <span className="text-[10px] text-slate-600 ml-auto">{total} events</span>
+            </h3>
+            <div className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                    <thead>
+                        <tr>
+                            <th className="text-[9px] text-slate-500 w-10"></th>
+                            {HOUR_LABELS.map((h, i) => (
+                                <th key={i} className="text-[8px] text-slate-500 font-normal px-0.5">
+                                    {i % 6 === 0 ? h : ''}
+                                </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {grid.map((row, dayIdx) => (
+                            <tr key={dayIdx}>
+                                <td className="text-[9px] text-slate-400 font-medium pr-2 text-right">{DAY_LABELS[dayIdx]}</td>
+                                {row.map((val, hourIdx) => (
+                                    <td key={hourIdx} className="p-0.5">
+                                        <div className={`w-full aspect-square rounded-sm ${intensity(val)} flex items-center justify-center`}
+                                            title={`${DAY_LABELS[dayIdx]} ${hourIdx}:00 — ${val} failures`}>
+                                            {val > maxVal * 0.5 && (
+                                                <span className="text-[7px] text-white/80 font-mono">{val}</span>
+                                            )}
+                                        </div>
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+            <div className="flex items-center justify-end space-x-2 mt-3">
+                <span className="text-[9px] text-slate-500">Low</span>
+                <div className="flex space-x-0.5">
+                    {[0, 0.2, 0.4, 0.6, 0.8].map((pct, i) => (
+                        <div key={i} className={`w-3 h-3 rounded-sm ${intensity(Math.round(pct * maxVal))}`} />
+                    ))}
+                </div>
+                <span className="text-[9px] text-slate-500">High</span>
+            </div>
+        </div>
+    );
+}
+
+
 // ── Main Dashboard ──────────────────────────────────────────────────────────
 
 export default function Dashboard({
@@ -440,6 +533,9 @@ export default function Dashboard({
                 <MTBFTrendChart categorized={data.categorized_failures} windowSize={Math.max(10, Math.floor(data.summary.total_failures / 20))} />
                 <RiskBubbleChart categorized={data.categorized_failures} graphReport={data.graph_report} />
             </div>
+
+            {/* ── Failure Heatmap ─────────────────────────────────────────── */}
+            <FailureHeatmap categorized={data.categorized_failures} />
 
             {/* ── Category PNG + Recent Failures ──────────────────────────── */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

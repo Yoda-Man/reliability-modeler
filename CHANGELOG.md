@@ -5,6 +5,22 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2025-08-08
+
+### Added
+- **Trend Comparison** (`GET /trends` + TrendsView): cross-run MTBF and failure rate
+  trend charts comparing all archived analyses. Shows improving/degrading/stable
+  direction with percentage change. Run-by-run data table included.
+- **Failure Heatmap**: day-of-week × hour-of-day grid in the Dashboard. Color
+  intensity shows failure density — spot temporal patterns at a glance.
+- **HTML Executive Report** (`GET /report/{id}/html`): self-contained,
+  print-ready HTML report with KPIs, summary, and embedded chart. Can be
+  saved and emailed by any external scheduler (cron, CI, etc.).
+- **Trends nav item** in the sidebar — new "Trends" tab between Dashboard and Logs.
+
+### Changed
+- Dashboard now includes the Failure Heatmap panel below the Risk Bubble chart.
+
 ## [2.2.0] - 2025-08-08
 
 ### Added

@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart } from 'lucide-react';
+import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp } from 'lucide-react';
 import FileUpload from '@/components/FileUpload';
 import Dashboard from '@/components/Dashboard';
 import MethodologyView from '@/components/Methodology';
 import ConfigView from '@/components/ConfigView';
 import LogsView from '@/components/LogsView';
+import TrendsView from '@/components/TrendsView';
 import UserManualView from '@/components/UserManualView';
 import PrivacyPolicy from '@/components/PrivacyPolicy';
 import AboutView from '@/components/AboutView';
@@ -59,6 +60,7 @@ export default function Home() {
 
   const renderContent = () => {
     if (activeTab === 'methodology') return <MethodologyView />;
+    if (activeTab === 'trends') return <TrendsView />;
     if (activeTab === 'logs') return <LogsView />;
     if (activeTab === 'config') return <ConfigView />;
     if (activeTab === 'user-manual') return <UserManualView />;
@@ -161,6 +163,12 @@ export default function Home() {
             label="Logs Archive"
             active={activeTab === 'logs'}
             onClick={() => { setActiveTab('logs'); setIsSidebarOpen(false); }}
+          />
+          <NavItem
+            icon={<TrendingUp size={18} />}
+            label="Trends"
+            active={activeTab === 'trends'}
+            onClick={() => { setActiveTab('trends'); setIsSidebarOpen(false); }}
           />
           <NavItem
             icon={<Settings size={18} />}
