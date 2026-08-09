@@ -5,6 +5,38 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2025-08-08
+
+### Error Resilience
+- **Request timeout** on `/analyze` — `asyncio.wait_for` with configurable
+  `ANALYSIS_TIMEOUT_SECONDS` (default 120s). Prevents hung workers.
+- **Atomic file writes** — log archives, config, and settings now use tmp-file +
+  `os.fsync` + atomic rename to prevent corruption on concurrent writes.
+- **Startup log pruning** — automatically removes log archives older than
+  90 days on every container start. No more unbounded disk growth.
+
+### Authentication UX
+- **API key wired into UI** — all fetch calls in page.tsx, ConfigView, LogsView,
+  and TrendsView now use a shared `apiFetch()` helper that injects `X-API-Key`
+  when `NEXT_PUBLIC_API_KEY` is configured. UI no longer breaks when the API
+  has auth enabled.
+- **Shared API helper** (`web/ui/src/app/api.ts`) — single source for API URL,
+  auth header, and 30s fetch timeout.
+
+### Performance
+- **Cached `/sample-data`** — first request computes and caches the result
+  in memory. Subsequent requests return instantly.
+
+### Testing
+- **2 end-to-end smoke tests** — full pipeline (load → fit → export → verify)
+  and CLI --help/--version verification.
+- **20/20 tests pass** (18 unit + 2 e2e). Junk test artifacts cleaned.
+
+### Changed
+- Version bumped to 2.4.0 across CLI, API, and health endpoint.
+- SUPPORT.md: documented `ANALYSIS_TIMEOUT_SECONDS` and `NEXT_PUBLIC_API_KEY`
+  env vars, log pruning schedule.
+
 ## [2.3.2] - 2025-08-08
 
 ### Security

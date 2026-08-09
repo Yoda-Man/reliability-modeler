@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp } from 'lucide-react';
+import { apiFetch } from './api';
 import FileUpload from '@/components/FileUpload';
 import Dashboard from '@/components/Dashboard';
 import MethodologyView from '@/components/Methodology';
@@ -25,7 +26,7 @@ export default function Home() {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/analyze?future_hours=${futureHours}`, {
+      const response = await apiFetch(`/analyze?future_hours=${futureHours}`, {
         method: 'POST',
         body: formData,
       });
@@ -45,7 +46,7 @@ export default function Home() {
   const handleSampleData = async () => {
     setIsAnalyzing(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/sample-data`);
+      const response = await apiFetch(`/sample-data`);
       if (!response.ok) throw new Error('Sample data analysis failed');
       const data = await response.json();
       setResults(data);

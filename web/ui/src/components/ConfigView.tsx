@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Settings, Sliders, Tag, FileCode, Save, Loader2, CheckCircle2, FlaskConical, Target } from 'lucide-react';
+import { apiFetch } from '@/app/api';
 
 interface ConfigSettings {
     multi_label: boolean;
@@ -27,7 +28,7 @@ export default function ConfigView() {
 
     const fetchConfig = async () => {
         try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/config`);
+            const response = await apiFetch('/config');
             if (response.ok) {
                 const data = await response.json();
                 setSettings(data);
@@ -43,7 +44,7 @@ export default function ConfigView() {
         setIsSaving(true);
         setSaveSuccess(false);
         try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/config`, {
+            const response = await apiFetch('/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(settings),

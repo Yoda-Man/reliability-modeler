@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Minus, Loader2, Calendar, BarChart3 } from 'lucide-react';
+import { apiFetch } from '@/app/api';
 
 interface TrendRun {
     id: string;
@@ -32,7 +33,7 @@ export default function TrendsView() {
 
     const fetchTrends = async () => {
         try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/trends`);
+            const response = await apiFetch('/trends');
             if (response.ok) {
                 setData(await response.json());
             }

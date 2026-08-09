@@ -21,6 +21,8 @@ import time
 import html as _html
 import secrets
 
+import asyncio
+
 # Add the app directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append("/app")
@@ -46,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.3.3")
+app = FastAPI(title="Reliability Modeler API", version="2.4.0")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -69,6 +71,27 @@ def _warn_ephemeral_storage():
 _warn_ephemeral_storage()
 
 
+# ── Startup: prune logs older than 90 days ───────────────────────────────────
+def _prune_logs_on_startup():
+    log_dir = ROOT_DIR / "output" / "logs"
+    if not log_dir.exists():
+        return
+    cutoff = datetime.now().timestamp() - (90 * 86400)
+    pruned = 0
+    for log_file in log_dir.glob("*.json"):
+        try:
+            if log_file.stat().st_mtime < cutoff:
+                log_file.unlink()
+                pruned += 1
+        except Exception:
+            pass
+    if pruned > 0:
+        logger.info(f"Startup: pruned {pruned} log files older than 90 days")
+
+
+_prune_logs_on_startup()
+
+
 # ── CORS ────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
 app.add_middleware(
@@ -79,9 +102,11 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-API-Key"],
 )
 
-# ── API Key Authentication (simple shared-secret for internal use) ────────────
+# ── API Key from env (used by UI via NEXT_PUBLIC_ var passthrough) ───────────
 API_KEY = os.getenv("RELIABILITY_API_KEY", "")
 AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json"}
+_ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
+_SAMPLE_CACHE: dict | None = None  # cached sample data result
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
@@ -163,8 +188,13 @@ def save_to_archive(log_id, filename, summary):
         "status": "Completed",
         "summary": summary
     }
-    with open(log_dir / f"{log_id}.json", "w") as f:
+    tmp_path = log_dir / f".{log_id}.tmp"
+    final_path = log_dir / f"{log_id}.json"
+    with open(tmp_path, "w") as f:
         json.dump(entry, f)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp_path.replace(final_path)  # atomic on same filesystem
 
 @app.get("/logs")
 async def get_logs(limit: int = 50, offset: int = 0):
@@ -410,6 +440,8 @@ async def save_config(data: dict):
         try:
             with open(config_path, "w") as f:
                 f.write(data["content"])
+                f.flush()
+                os.fsync(f.fileno())
             logger.info(f"Config updated: {config_path}")
         except IOError as e:
             logger.error(f"Failed to write config: {e}")
@@ -421,8 +453,12 @@ async def save_config(data: dict):
             if settings_data["optimization_method"] not in VALID_OPTIMIZATION_METHODS:
                 raise HTTPException(status_code=400, detail=f"Invalid optimization method. Choose from: {', '.join(sorted(VALID_OPTIMIZATION_METHODS))}")
         try:
-            with open(BASE_DIR / "settings.json", "w") as f:
+            tmp_path = BASE_DIR / ".settings.json.tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(settings_data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(BASE_DIR / "settings.json")
             logger.info("Settings updated")
         except IOError as e:
             logger.error(f"Failed to write settings: {e}")
@@ -468,14 +504,21 @@ async def analyze_failure_data(
         os.remove(csv_path)
         raise HTTPException(status_code=400, detail="File is not valid UTF-8 text")
     
-    return await run_analysis_pipeline(csv_path, file.filename or "uploaded.csv", future_hours)
+    return await asyncio.wait_for(
+        run_analysis_pipeline(csv_path, file.filename or "uploaded.csv", future_hours),
+        timeout=_ANALYSIS_TIMEOUT_SECONDS
+    )
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.3.3", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.4.0", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():
+    global _SAMPLE_CACHE
+    if _SAMPLE_CACHE is not None:
+        return _SAMPLE_CACHE
+
     sample_path = BASE_DIR / "sample_data.csv"
     if not sample_path.exists():
         sample_path = Path("/app/sample_data.csv")
@@ -483,7 +526,9 @@ async def analyze_sample_data():
     if not sample_path.exists():
         raise HTTPException(status_code=404, detail="Sample data not found")
         
-    return await run_analysis_pipeline(sample_path, "sample_data.csv", 1000.0)
+    result = await run_analysis_pipeline(sample_path, "sample_data.csv", 1000.0)
+    _SAMPLE_CACHE = result  # cache for subsequent requests
+    return result
 
 def _compute_aic(ll: float, k: int) -> float:
     """Shared AIC calculation: AIC = 2k - 2ln(L)"""

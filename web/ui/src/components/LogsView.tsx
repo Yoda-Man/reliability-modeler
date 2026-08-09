@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { History, FileText, Calendar, Search, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { apiFetch } from '@/app/api';
 
 const PAGE_SIZE = 50;
 
@@ -30,9 +31,7 @@ export default function LogsView() {
     const fetchLogs = async (newOffset: number = 0) => {
         setIsLoading(true);
         try {
-            const response = await fetch(
-                `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/logs?limit=${PAGE_SIZE}&offset=${newOffset}`
-            );
+            const response = await apiFetch(`/logs?limit=${PAGE_SIZE}&offset=${newOffset}`);
             if (response.ok) {
                 const json: LogsResponse = await response.json();
                 setData(json);
