@@ -26,7 +26,7 @@ export default function PrivacyPolicy() {
                         <p className="text-slate-300 leading-relaxed">
                             The Reliability Modeler is designed as a self-hosted, containerized application.
                             <span className="text-emerald-500 font-bold px-1">All data processed remains within your Docker environment.</span>
-                            None of your uploaded CSV files, error descriptions, or analysis results are ever transmitted to external servers or third parties.
+                            None of the failure data pulled from Sentry, error descriptions, or analysis results are ever transmitted to external servers or third parties.
                         </p>
                     </div>
                 </section>
@@ -40,10 +40,10 @@ export default function PrivacyPolicy() {
                         <div className="p-6 rounded-2xl bg-slate-900/30 border border-slate-800">
                             <h4 className="text-white font-medium mb-2 flex items-center">
                                 <FileText className="w-4 h-4 mr-2 text-slate-500" />
-                                Uploaded Files
+                                Failure Events
                             </h4>
                             <p className="text-xs text-slate-400 leading-relaxed">
-                                CSV files are processed in-memory and temporarily stored in `/app/temp_uploads` during analysis. They are automatically deleted immediately after processing is complete.
+                                Failure events are pulled from Sentry on demand and stored in <code className="text-slate-500">/app/output/analyses</code> to power historical graph queries. They are automatically pruned after 90 days.
                             </p>
                         </div>
                         <div className="p-6 rounded-2xl bg-slate-900/30 border border-slate-800">

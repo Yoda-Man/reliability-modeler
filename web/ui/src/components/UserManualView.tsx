@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Book, CheckCircle2, FileJson, Info, Layout, PlayCircle, Settings, Terminal } from 'lucide-react';
+import { Book, CheckCircle2, Layout, PlayCircle, Settings, Terminal } from 'lucide-react';
 
 export default function UserManualView() {
     return (
@@ -25,15 +25,15 @@ export default function UserManualView() {
                     <ol className="space-y-4">
                         <li className="flex items-start bg-slate-900/40 p-4 rounded-xl border border-slate-800">
                             <span className="w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold mr-4 shrink-0">1</span>
-                            <p className="text-sm text-slate-300 leading-relaxed">Navigate to the <strong>Dashboard</strong> and locate the upload zone.</p>
+                            <p className="text-sm text-slate-300 leading-relaxed">Open the <strong>Sentry</strong> tab from the sidebar.</p>
                         </li>
                         <li className="flex items-start bg-slate-900/40 p-4 rounded-xl border border-slate-800">
                             <span className="w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold mr-4 shrink-0">2</span>
-                            <p className="text-sm text-slate-300 leading-relaxed">Drag your failure CSV file. Ensure it contains a <strong>Timestamp</strong> and <strong>Description</strong>.</p>
+                            <p className="text-sm text-slate-300 leading-relaxed">Enter your <strong>organization</strong> slug and a <strong>project</strong> (or enable "Analyze all projects").</p>
                         </li>
                         <li className="flex items-start bg-slate-900/40 p-4 rounded-xl border border-slate-800">
                             <span className="w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold mr-4 shrink-0">3</span>
-                            <p className="text-sm text-slate-300 leading-relaxed">The engine will auto-categorize your faults and fit the <strong>GO/MO</strong> models instantly.</p>
+                            <p className="text-sm text-slate-300 leading-relaxed">The engine pulls failure events from Sentry, auto-categorizes them, and fits the <strong>GO/MO</strong> models instantly.</p>
                         </li>
                     </ol>
                 </ManualSection>
@@ -84,7 +84,7 @@ export default function UserManualView() {
                 <section className="pt-8 flex justify-center border-t border-slate-800">
                     <div className="flex items-center space-x-2 text-xs text-slate-500 font-bold uppercase tracking-widest">
                         <CheckCircle2 className="w-4 h-4 text-blue-500" />
-                        <span>Certification Ready • V2.0.0</span>
+                        <span>Certification Ready • V2.8.0</span>
                     </div>
                 </section>
             </div>
