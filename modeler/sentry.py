@@ -156,36 +156,65 @@ def _event_description(event: dict) -> str:
     return desc
 
 
-def load_sentry_failures(
+def list_sentry_projects(
+    org: str,
+    auth_token: str,
+    base_url: Optional[str] = None,
+) -> List[dict]:
+    """
+    List all projects in a Sentry organization.
+
+    Returns a list of dicts with keys like: slug, name, platform, status.
+    """
+    base = (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    url = f"{base}/organizations/{urllib.parse.quote(org)}/projects/"
+
+    projects: List[dict] = []
+    next_cursor: Optional[str] = None
+    pages = 0
+
+    while pages < 20:  # orgs rarely exceed 2000 projects
+        page_url = url
+        if next_cursor:
+            sep = "&" if "?" in page_url else "?"
+            page_url = f"{page_url}{sep}cursor={urllib.parse.quote(next_cursor)}"
+
+        req = urllib.request.Request(page_url)
+        req.add_header("Authorization", f"Bearer {auth_token}")
+        req.add_header("Accept", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                next_cursor = _extract_next_cursor(resp.headers.get("Link", ""))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            if e.code == 401:
+                raise SentryError("Sentry authentication failed (401). Check SENTRY_AUTH_TOKEN scopes.")
+            if e.code == 404:
+                raise SentryError(f"Sentry organization not found (404): {org}")
+            raise SentryError(f"Sentry API error {e.code}: {body[:300]}")
+        except urllib.error.URLError as e:
+            raise SentryError(f"Sentry network error: {e.reason}")
+
+        if not data:
+            break
+        projects.extend(data)
+        pages += 1
+        if next_cursor is None:
+            break
+
+    logger.info(f"Sentry: found {len(projects)} projects in org '{org}'")
+    return projects
+
+
+def _fetch_project_events(
     org: str,
     project: str,
     auth_token: str,
-    config_path: Path,
-    days: int = 30,
-    multi_label: bool = False,
-    base_url: Optional[str] = None,
-) -> Tuple[np.ndarray, List[Tuple], datetime, Optional[list]]:
-    """
-    Pull failure events from Sentry and return the SAME normalized tuple that
-    `load_failure_data()` returns:
-        (t_hours: np.ndarray, cat_list: [(iso, hours, categories, desc)], t0: datetime, fault_categories)
-
-    Args:
-        org:           Sentry organization slug
-        project:       Sentry project slug
-        auth_token:    Sentry auth token with event:read scope
-        config_path:   path to fault_categories.conf
-        days:          look-back window in days
-        multi_label:   allow multiple categories per event
-        base_url:      override API base URL (for self-hosted Sentry)
-    """
-    fault_categories = load_fault_categories(config_path)
-    base = (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    until = datetime.now(timezone.utc).isoformat()
-
-    # Build the initial query URL
+    base_url: str,
+    days: int,
+) -> List[dict]:
+    """Fetch raw event dicts for a single project, with pagination."""
     params = {
         "full": "false",
         "limit": str(PAGE_SIZE),
@@ -197,7 +226,6 @@ def load_sentry_failures(
     next_cursor: Optional[str] = None
     pages = 0
 
-    # Paginate
     while pages < MAX_PAGES:
         page_url = url
         if next_cursor:
@@ -209,31 +237,29 @@ def load_sentry_failures(
             break
         all_events.extend(events)
         pages += 1
-        logger.info(f"Sentry: fetched page {pages} ({len(events)} events, total {len(all_events)})")
         if next_cursor is None:
             break
 
     if pages >= MAX_PAGES and next_cursor is not None:
-        logger.warning(f"Sentry: hit MAX_PAGES ({MAX_PAGES}) cap — results may be truncated.")
+        logger.warning(f"Sentry: {project} hit MAX_PAGES ({MAX_PAGES}) — results truncated.")
 
-    if not all_events:
-        logger.warning(f"Sentry: no events found for {org}/{project} in last {days} days")
-        return np.array([]), [], datetime.now(timezone.utc), fault_categories
+    return all_events
 
-    # Normalize into the same shape as load_failure_data
-    full_events: List[Tuple[datetime, str]] = []
-    for event in all_events:
-        dt = _parse_event_timestamp(event)
-        if dt is None:
-            continue
-        desc = _event_description(event)
-        full_events.append((dt, desc))
 
-    full_events.sort(key=lambda x: x[0])
+def _normalize_raw_events(
+    raw_events: List[Tuple[datetime, str]],
+    fault_categories: Optional[list],
+    multi_label: bool,
+) -> Tuple[np.ndarray, List[Tuple], datetime]:
+    """Normalize (datetime, desc) pairs into (t_hours, cat_list, t0)."""
+    if not raw_events:
+        return np.array([]), [], datetime.now(timezone.utc)
 
-    t0 = full_events[0][0]
+    raw_events.sort(key=lambda x: x[0])
+    t0 = raw_events[0][0]
+
     failure_events = []
-    for dt, desc in full_events:
+    for dt, desc in raw_events:
         cats = categorize_description(desc, fault_categories, multi_label)
         rel_hours = (dt - t0).total_seconds() / 3600.0
         if rel_hours >= 0:
@@ -249,5 +275,102 @@ def load_sentry_failures(
         cats_str = ", ".join(ev[2]) if isinstance(ev[2], list) else ev[2]
         cat_list.append((dt_iso, time_h, cats_str, ev[3]))
 
-    logger.info(f"Sentry: processed {len(failure_events)} failure events from {org}/{project}")
+    return t_hours, cat_list, t0
+
+
+def load_sentry_failures(
+    org: str,
+    project: str,
+    auth_token: str,
+    config_path: Path,
+    days: int = 30,
+    multi_label: bool = False,
+    base_url: Optional[str] = None,
+) -> Tuple[np.ndarray, List[Tuple], datetime, Optional[list]]:
+    """
+    Pull failure events from a single Sentry project and return the SAME
+    normalized tuple that `load_failure_data()` returns:
+        (t_hours: np.ndarray, cat_list: [(iso, hours, categories, desc)], t0: datetime, fault_categories)
+    """
+    fault_categories = load_fault_categories(config_path)
+    base = (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+
+    all_events = _fetch_project_events(org, project, auth_token, base, days)
+
+    if not all_events:
+        logger.warning(f"Sentry: no events found for {org}/{project} in last {days} days")
+        return np.array([]), [], datetime.now(timezone.utc), fault_categories
+
+    raw_events: List[Tuple[datetime, str]] = []
+    for event in all_events:
+        dt = _parse_event_timestamp(event)
+        if dt is None:
+            continue
+        raw_events.append((dt, _event_description(event)))
+
+    t_hours, cat_list, t0 = _normalize_raw_events(raw_events, fault_categories, multi_label)
+    logger.info(f"Sentry: processed {len(cat_list)} failure events from {org}/{project}")
     return t_hours, cat_list, t0, fault_categories
+
+
+def load_sentry_failures_all(
+    org: str,
+    auth_token: str,
+    config_path: Path,
+    days: int = 30,
+    multi_label: bool = False,
+    base_url: Optional[str] = None,
+    max_projects: Optional[int] = None,
+) -> Tuple[np.ndarray, List[Tuple], datetime, Optional[list], Dict[str, int]]:
+    """
+    Pull failure events from ALL projects in an org and aggregate them into a
+    single system-wide timeline. Returns:
+        (t_hours, cat_list, t0, fault_categories, project_counts)
+
+    project_counts maps project name -> number of failure events, for a
+    per-project breakdown. Each event description is tagged with its project.
+    """
+    fault_categories = load_fault_categories(config_path)
+    base = (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+
+    projects = list_sentry_projects(org, auth_token, base)
+    if max_projects:
+        projects = projects[:max_projects]
+
+    if not projects:
+        logger.warning(f"Sentry: no projects found in org '{org}'")
+        return np.array([]), [], datetime.now(timezone.utc), fault_categories, {}
+
+    all_raw: List[Tuple[datetime, str]] = []
+    project_counts: Dict[str, int] = {}
+
+    for p in projects:
+        slug = p.get("slug", "")
+        name = p.get("name") or slug
+        if not slug:
+            continue
+        try:
+            events = _fetch_project_events(org, slug, auth_token, base, days)
+        except SentryError as e:
+            logger.warning(f"Sentry: skipping project {slug}: {e}")
+            continue
+
+        count = 0
+        for event in events:
+            dt = _parse_event_timestamp(event)
+            if dt is None:
+                continue
+            desc = _event_description(event)
+            desc = f"[project: {name}] {desc}"
+            all_raw.append((dt, desc))
+            count += 1
+        project_counts[name] = count
+        logger.info(f"Sentry: {name} ({slug}) → {count} events")
+
+    if not all_raw:
+        logger.warning(f"Sentry: no events across {len(projects)} projects in {org}")
+        return np.array([]), [], datetime.now(timezone.utc), fault_categories, project_counts
+
+    t_hours, cat_list, t0 = _normalize_raw_events(all_raw, fault_categories, multi_label)
+    logger.info(f"Sentry: aggregated {len(cat_list)} events across {len(project_counts)} projects in {org}")
+    return t_hours, cat_list, t0, fault_categories, project_counts

@@ -5,6 +5,27 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2025-08-08
+
+### Added — Multi-Project Sentry
+- **`list_sentry_projects()`** — lists all projects in a Sentry org
+  (paginated via Link header).
+- **`load_sentry_failures_all()`** — aggregates failure events across every
+  project in an org into one system-wide reliability timeline, returning a
+  per-project breakdown. Each event description is tagged with `[project: X]`.
+- **`GET /ingest/sentry/projects?org=X`** — list projects for the UI.
+- **`POST /ingest/sentry`** now accepts `project: "all"` to aggregate every
+  project, and returns a `projects` breakdown (sorted by failure count).
+- **"Analyze all projects" toggle** in the Sentry tab.
+- **Project Breakdown panel** in the Dashboard (horizontal bars, color-coded).
+- **2 new unit tests** for `_normalize_raw_events`.
+
+### Changed
+- `load_sentry_failures` refactored to share `_fetch_project_events()` and
+  `_normalize_raw_events()` helpers — single-project and multi-project paths
+  are now consistent.
+- Version bumped to 2.6.0.
+
 ## [2.5.0] - 2025-08-08
 
 ### Added — Sentry Integration

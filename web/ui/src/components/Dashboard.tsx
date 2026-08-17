@@ -44,6 +44,7 @@ interface AnalysisResults {
     categorized_failures: Array<any>;
     graph_insights?: string[];
     graph_report?: GraphReport | null;
+    projects?: Record<string, number>;
 }
 
 // ── Color Palette ───────────────────────────────────────────────────────────
@@ -449,6 +450,35 @@ export default function Dashboard({
                     icon={<Zap className="text-purple-500 w-4 h-4" />}
                     description="Failures per hour" tooltip="Overall failure intensity across the observation period." />
             </div>
+
+            {/* ── Project Breakdown (Sentry multi-project) ─────────────────── */}
+            {data.projects && Object.keys(data.projects).length > 0 && (
+                <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl">
+                    <h3 className="text-sm font-semibold text-white mb-4 flex items-center space-x-2">
+                        <span>Project Breakdown</span>
+                        <span className="text-[10px] text-slate-500 font-normal">failure events per project</span>
+                    </h3>
+                    <div className="space-y-2">
+                        {Object.entries(data.projects).slice(0, 12).map(([name, count], i) => {
+                            const max = Math.max(...Object.values(data.projects)) || 1;
+                            const pct = (count / max) * 100;
+                            return (
+                                <div key={name} className="flex items-center space-x-3">
+                                    <span className="text-xs text-slate-300 w-40 truncate flex-shrink-0">{name}</span>
+                                    <div className="flex-1 h-5 bg-slate-800/40 rounded-md overflow-hidden">
+                                        <div className="h-full rounded-md transition-all" style={{
+                                            width: `${pct}%`,
+                                            backgroundColor: CATEGORY_COLORS[i % CATEGORY_COLORS.length],
+                                            opacity: 0.75,
+                                        }} />
+                                    </div>
+                                    <span className="text-xs font-mono text-slate-400 w-12 text-right flex-shrink-0">{count}</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
 
             {/* ── Main Charts Row ────────────────────────────────────────── */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

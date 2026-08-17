@@ -31,7 +31,7 @@ from modeler.data import load_failure_data, categorize_description, load_fault_c
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
 from modeler.graphs import build_failure_graphs, generate_graph_insights
-from modeler.sentry import load_sentry_failures, SentryError
+from modeler.sentry import load_sentry_failures, load_sentry_failures_all, list_sentry_projects, SentryError
 try:
     from .graphql_schema import schema, store_analysis_data
 except ImportError:
@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.5.0")
+app = FastAPI(title="Reliability Modeler API", version="2.6.0")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -512,7 +512,7 @@ async def analyze_failure_data(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.5.0", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.6.0", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():
@@ -689,13 +689,16 @@ async def ingest_sentry(payload: dict):
 
     Body:
         {"org": "my-org", "project": "my-project", "days": 30, "future_hours": 1000}
+        {"org": "my-org", "project": "all", "days": 30, "future_hours": 1000}   # aggregate all projects
 
     Requires SENTRY_AUTH_TOKEN env var to be set on the API server.
     """
     org = payload.get("org")
     project = payload.get("project")
-    if not org or not project:
-        raise HTTPException(status_code=400, detail="Both 'org' and 'project' are required")
+    if not org:
+        raise HTTPException(status_code=400, detail="'org' is required")
+    if not project:
+        raise HTTPException(status_code=400, detail="'project' is required (use 'all' to aggregate every project)")
 
     auth_token = os.getenv("SENTRY_AUTH_TOKEN", "")
     if not auth_token:
@@ -713,12 +716,22 @@ async def ingest_sentry(payload: dict):
     if not config_path.exists():
         config_path = Path("/app/fault_categories.conf")
 
+    project_counts = {}
     try:
-        t, categorized, t0, _ = await asyncio.to_thread(
-            load_sentry_failures,
-            org, project, auth_token, config_path, days,
-            load_persistent_settings().multi_label,
-        )
+        if project == "all":
+            t, categorized, t0, _, project_counts = await asyncio.to_thread(
+                load_sentry_failures_all,
+                org, auth_token, config_path, days,
+                load_persistent_settings().multi_label,
+            )
+            display_name = f"sentry://{org}/ALL_PROJECTS ({days}d)"
+        else:
+            t, categorized, t0, _ = await asyncio.to_thread(
+                load_sentry_failures,
+                org, project, auth_token, config_path, days,
+                load_persistent_settings().multi_label,
+            )
+            display_name = f"sentry://{org}/{project} ({days}d)"
     except SentryError as e:
         logger.error(f"Sentry ingest failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -726,11 +739,40 @@ async def ingest_sentry(payload: dict):
     if len(t) == 0:
         raise HTTPException(status_code=400, detail=f"No failure events found in Sentry for {org}/{project} in the last {days} days")
 
-    filename = f"sentry://{org}/{project} ({days}d)"
-    return await asyncio.wait_for(
-        _analyze_from_data(t, categorized, t0, filename, future_hours),
+    result = await asyncio.wait_for(
+        _analyze_from_data(t, categorized, t0, display_name, future_hours),
         timeout=_ANALYSIS_TIMEOUT_SECONDS
     )
+
+    # Attach per-project breakdown when aggregating all projects
+    if project_counts:
+        result["projects"] = dict(sorted(project_counts.items(), key=lambda kv: kv[1], reverse=True))
+    return result
+
+
+@app.get("/ingest/sentry/projects")
+async def list_sentry_projects_endpoint(org: str):
+    """
+    List all projects in a Sentry organization. Returns [{slug, name, platform}, ...].
+    Requires SENTRY_AUTH_TOKEN env var.
+    """
+    if not org:
+        raise HTTPException(status_code=400, detail="'org' query parameter is required")
+    auth_token = os.getenv("SENTRY_AUTH_TOKEN", "")
+    if not auth_token:
+        raise HTTPException(status_code=503, detail="SENTRY_AUTH_TOKEN not configured on the API server")
+    try:
+        projects = await asyncio.to_thread(list_sentry_projects, org, auth_token)
+    except SentryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {
+        "org": org,
+        "count": len(projects),
+        "projects": [
+            {"slug": p.get("slug", ""), "name": p.get("name", p.get("slug", ""))}
+            for p in projects
+        ],
+    }
 
 
 @app.post("/graphql")

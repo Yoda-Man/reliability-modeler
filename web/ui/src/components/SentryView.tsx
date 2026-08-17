@@ -13,13 +13,18 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
     const [org, setOrg] = useState('');
     const [project, setProject] = useState('');
     const [days, setDays] = useState(30);
+    const [analyzeAll, setAnalyzeAll] = useState(false);
     const [error, setError] = useState('');
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError('');
-        if (!org.trim() || !project.trim()) {
-            setError('Both organization and project are required.');
+        if (!org.trim()) {
+            setError('Organization is required.');
+            return;
+        }
+        if (!analyzeAll && !project.trim()) {
+            setError('Enter a project slug or enable "Analyze all projects".');
             return;
         }
         if (days < 1 || days > 365) {
@@ -27,7 +32,7 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
             return;
         }
         try {
-            await onAnalyze(org.trim(), project.trim(), days);
+            await onAnalyze(org.trim(), analyzeAll ? 'all' : project.trim(), days);
         } catch (err: any) {
             setError(err.message || 'Failed to pull data from Sentry.');
         }
@@ -69,10 +74,24 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
                             type="text"
                             value={project}
                             onChange={(e) => setProject(e.target.value)}
-                            placeholder="e.g. web-app"
-                            className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
+                            placeholder={analyzeAll ? 'All projects selected' : 'e.g. web-app'}
+                            disabled={analyzeAll}
+                            className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         />
                     </div>
+
+                    <label className="flex items-center space-x-3 p-4 rounded-xl bg-purple-600/5 border border-purple-500/20 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={analyzeAll}
+                            onChange={(e) => setAnalyzeAll(e.target.checked)}
+                            className="w-4 h-4 rounded border-slate-700 accent-purple-500"
+                        />
+                        <div>
+                            <span className="text-sm font-semibold text-white">Analyze all projects</span>
+                            <p className="text-xs text-slate-500">Aggregate every project in the org into one system-wide reliability model.</p>
+                        </div>
+                    </label>
 
                     <div>
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">

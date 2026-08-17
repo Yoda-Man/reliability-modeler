@@ -48,7 +48,7 @@ def main():
     parser.add_argument('--prefix', default=None)
     parser.add_argument('--output-dir', default='output', help="Directory to save output files")
     parser.add_argument('--max-iter', type=int, default=5000, help="Maximum iterations for optimizer")
-    parser.add_argument('--version', action='version', version='Reliability Modeler v2.5.0')
+    parser.add_argument('--version', action='version', version='Reliability Modeler v2.6.0')
 
     args = parser.parse_args()
 
