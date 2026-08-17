@@ -260,8 +260,8 @@ def _compute_graph_analytics(
             pagerank=round(pagerank.get(cat, 0), 6),
             betweenness=round(betweenness.get(cat, 0), 6),
             degree=int(deg),
-            is_keystone=pagerank.get(cat, 0) >= pr_threshold,
-            is_bridge=betweenness.get(cat, 0) >= bw_threshold,
+            is_keystone=bool(pagerank.get(cat, 0) >= pr_threshold),
+            is_bridge=bool(betweenness.get(cat, 0) >= bw_threshold),
         ))
     centrality.sort(key=lambda x: x.pagerank, reverse=True)
 

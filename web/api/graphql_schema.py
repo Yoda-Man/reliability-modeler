@@ -9,6 +9,7 @@ cascade chains, community clusters, and raw graph structures for visualization.
 from __future__ import annotations
 
 import graphene
+import logging
 from typing import List, Optional
 
 
@@ -124,6 +125,14 @@ class Query(graphene.ObjectType):
         description="Get the most common failure cascade chains",
     )
 
+    available_analyses = graphene.List(
+        graphene.String,
+        description="List all analysis IDs available for graph querying (memory + disk)",
+    )
+
+    def resolve_available_analyses(self, info):
+        return list_available_analyses()
+
     def resolve_failure_graph(self, info, analysis_id, cascade_window_hours=2.0, min_cooccurrence=3):
         from modeler.graphs import build_failure_graphs
         categorized = _get_categorized_data(info, analysis_id)
@@ -166,23 +175,63 @@ class Query(graphene.ObjectType):
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# In-memory store for categorized data keyed by analysis_id.
-# In production this would be a database; for internal use, in-memory is fine.
+import json
+from pathlib import Path
+
+_BASE_DIR = Path(__file__).resolve().parent
+_ROOT_DIR = _BASE_DIR.parent.parent
+_ANALYSES_DIR = _ROOT_DIR / "output" / "analyses"
+
+# In-memory cache of categorized data keyed by analysis_id.
+# Persisted to output/analyses/{id}.json so GraphQL can query historical
+# analyses across restarts.
 _analysis_store: dict = {}
 
 
 def store_analysis_data(analysis_id: str, categorized_list: list):
-    """Store categorized failure data for later GraphQL queries."""
+    """Store categorized failure data (memory + disk) for later GraphQL queries."""
     _analysis_store[analysis_id] = categorized_list
-    # Prune old entries (keep last 100)
+    # Prune in-memory cache (keep last 100); disk copy remains
     if len(_analysis_store) > 100:
         oldest = sorted(_analysis_store.keys())[0]
         del _analysis_store[oldest]
 
+    # Persist to disk for historical queries
+    try:
+        _ANALYSES_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _ANALYSES_DIR / f".{analysis_id}.tmp"
+        final = _ANALYSES_DIR / f"{analysis_id}.json"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(categorized_list, f)
+        tmp.replace(final)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to persist analysis data: {e}")
+
 
 def _get_categorized_data(info, analysis_id: str) -> Optional[list]:
-    """Retrieve stored categorized data for an analysis run."""
-    return _analysis_store.get(analysis_id)
+    """Retrieve stored categorized data — memory first, then disk fallback."""
+    if analysis_id in _analysis_store:
+        return _analysis_store[analysis_id]
+    # Disk fallback (survives restart)
+    disk_path = _ANALYSES_DIR / f"{analysis_id}.json"
+    if disk_path.exists():
+        try:
+            with open(disk_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _analysis_store[analysis_id] = data  # warm the cache
+            return data
+        except Exception:
+            return None
+    return None
+
+
+def list_available_analyses() -> List[str]:
+    """Return all analysis IDs available for GraphQL querying (memory + disk)."""
+    ids = set(_analysis_store.keys())
+    if _ANALYSES_DIR.exists():
+        for f in _ANALYSES_DIR.glob("*.json"):
+            ids.add(f.stem)
+    return sorted(ids)
 
 
 schema = graphene.Schema(query=Query)

@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.7.0")
+app = FastAPI(title="Reliability Modeler API", version="2.7.1")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -465,7 +465,7 @@ async def save_config(data: dict):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.7.0", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.7.1", "timestamp": datetime.now().isoformat()}
 
 def _compute_aic(ll: float, k: int) -> float:
     """Shared AIC calculation: AIC = 2k - 2ln(L)"""

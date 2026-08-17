@@ -73,7 +73,29 @@ See [`SUPPORT.md`](SUPPORT.md) for the full runbook, and [`USER_MANUAL.md`](USER
 | GET | `/logs` | Paginated analysis archive |
 | GET | `/trends` | Cross-run MTBF/failure-rate comparison |
 | GET | `/report/{id}/html` | Self-contained HTML executive report |
-| POST | `/graphql` | Failure graph queries |
+| POST | `/graphql` | Failure graph queries (persisted across restarts) |
+
+### GraphQL
+
+The failure graph data is queryable via GraphQL at `POST /graphql`. After each Sentry analysis, the categorized data is persisted to `output/analyses/`, so graph queries work for **historical analyses** across restarts — not just the current session.
+
+```graphql
+# List all analyses available for graph querying
+{ availableAnalyses }
+
+# Get keystone (most central) categories for a past analysis
+{ keystoneCategories(analysisId: "AN-20260808-175500") { node pagerank isBridge } }
+
+# Get failure cascade chains
+{ cascadeChains(analysisId: "AN-20260808-175500") { chain confidence } }
+
+# Full graph report
+{ failureGraph(analysisId: "AN-20260808-175500") {
+    graphMetrics { numCategories numCascadeEdges }
+    centralityScores { node pagerank isKeystone }
+  }
+}
+```
 
 ## Development
 
