@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Settings, Sliders, Tag, FileCode, Save, Loader2, CheckCircle2, FlaskConical, Target } from 'lucide-react';
-import { apiFetch } from '@/app/api';
+import { apiFetch } from '@/app/apiClient';
 
 interface ConfigSettings {
     multi_label: boolean;

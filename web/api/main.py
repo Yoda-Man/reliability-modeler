@@ -18,6 +18,8 @@ import json
 import time
 import html as _html
 import secrets
+import re
+import shutil
 
 import asyncio
 
@@ -37,7 +39,9 @@ except ImportError:
 
 # Define base directory for relative path resolution
 BASE_DIR = Path(__file__).resolve().parent
-ROOT_DIR = BASE_DIR.parent.parent
+# Docker uses a flat layout (main.py, modeler/, fault_categories.conf all in /app);
+# local dev uses web/api/ with the project root two levels up.
+ROOT_DIR = BASE_DIR if (BASE_DIR / "fault_categories.conf").exists() else BASE_DIR.parent.parent
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -47,7 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.7.2")
+app = FastAPI(title="Reliability Modeler API", version="2.8.0")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -71,21 +75,31 @@ _warn_ephemeral_storage()
 
 
 # ── Startup: prune logs older than 90 days ───────────────────────────────────
-def _prune_logs_on_startup():
-    log_dir = ROOT_DIR / "output" / "logs"
-    if not log_dir.exists():
-        return
-    cutoff = datetime.now().timestamp() - (90 * 86400)
+def _prune_directory(dir_path: Path, cutoff: float) -> int:
+    """Delete files older than `cutoff` in a directory. Returns count pruned."""
+    if not dir_path.exists():
+        return 0
     pruned = 0
-    for log_file in log_dir.glob("*.json"):
+    for f in dir_path.iterdir():
         try:
-            if log_file.stat().st_mtime < cutoff:
-                log_file.unlink()
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
                 pruned += 1
         except Exception:
             pass
+    return pruned
+
+
+def _prune_logs_on_startup():
+    cutoff = datetime.now().timestamp() - (90 * 86400)
+    log_dir = ROOT_DIR / "output" / "logs"
+    analyses_dir = ROOT_DIR / "output" / "analyses"
+    plots_dir = ROOT_DIR / "output" / "plots"
+    pruned = _prune_directory(log_dir, cutoff)
+    pruned += _prune_directory(analyses_dir, cutoff)
+    pruned += _prune_directory(plots_dir, cutoff)
     if pruned > 0:
-        logger.info(f"Startup: pruned {pruned} log files older than 90 days")
+        logger.info(f"Startup: pruned {pruned} files older than 90 days")
 
 
 _prune_logs_on_startup()
@@ -101,10 +115,15 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-API-Key"],
 )
 
-# ── API Key from env (used by UI via NEXT_PUBLIC_ var passthrough) ───────────
+# ── API Key from env ─────────────────────────────────────────────────────────
 API_KEY = os.getenv("RELIABILITY_API_KEY", "")
-AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json"}
+AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
 _ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
+
+if not API_KEY:
+    logger.warning("⚠️  RELIABILITY_API_KEY is not set — API key authentication is DISABLED. "
+                   "Every endpoint is reachable by anyone on the network. "
+                   "Set RELIABILITY_API_KEY to protect POST/DELETE routes.")
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
@@ -112,8 +131,6 @@ async def api_key_middleware(request: Request, call_next):
         return await call_next(request)  # auth disabled if no key configured
     if request.url.path in AUTH_EXEMPT_PATHS or request.url.path.startswith("/health"):
         return await call_next(request)
-    if request.method == "GET":
-        return await call_next(request)  # GET is read-only, safe without auth
     provided = request.headers.get("X-API-Key", "")
     if not secrets.compare_digest(provided, API_KEY):
         logger.warning(f"Auth failed for {request.client.host if request.client else 'unknown'} on {request.method} {request.url.path}")
@@ -128,7 +145,12 @@ RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    client_ip = request.client.host if request.client else "unknown"
+    # Trust a single terminating proxy's X-Forwarded-For (first hop)
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        client_ip = xff.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
     timestamps = [t for t in _rate_limit_store.get(client_ip, []) if t > window_start]
@@ -149,7 +171,11 @@ async def rate_limit_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    req_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+    raw_id = request.headers.get("X-Request-ID", "")
+    # Sanitize to a short safe token (prevent log-forging via newlines/control chars)
+    req_id = "".join(c for c in raw_id if c.isalnum() or c == '-')[:32]
+    if not req_id:
+        req_id = str(uuid.uuid4())[:8]
     request.state.req_id = req_id
     logger.info(f"[{req_id}] {request.method} {request.url.path}")
     start = time.time()
@@ -165,14 +191,17 @@ MAX_FUTURE_HOURS = 100000
 
 class Settings(BaseModel):
     multi_label: bool = False
-    optimization_method: str = "TNC"
+    optimization_method: str = "L-BFGS-B"
     tolerance: float = 1e-6
 
 def load_persistent_settings() -> Settings:
     settings_path = BASE_DIR / "settings.json"
     if settings_path.exists():
-        with open(settings_path, "r") as f:
-            return Settings(**json.load(f))
+        try:
+            with open(settings_path, "r") as f:
+                return Settings(**json.load(f))
+        except Exception as e:
+            logger.error(f"Failed to load settings.json ({e}) — using defaults")
     return Settings()
 
 def save_to_archive(log_id, filename, summary):
@@ -218,23 +247,21 @@ async def get_logs(limit: int = 50, offset: int = 0):
 
 @app.post("/logs/prune")
 async def prune_logs(retention_days: int = 90):
-    """Delete log archives older than `retention_days` days. Default 90."""
-    log_dir = ROOT_DIR / "output" / "logs"
-    if not log_dir.exists():
-        return {"pruned": 0, "message": "No log directory found"}
-    
+    """Delete archived logs, analyses, and plots older than `retention_days`. Default 90."""
+    if retention_days < 7:
+        raise HTTPException(status_code=400, detail="retention_days must be at least 7")
+
     cutoff = datetime.now().timestamp() - (retention_days * 86400)
-    pruned = 0
-    for log_file in log_dir.glob("*.json"):
-        try:
-            if log_file.stat().st_mtime < cutoff:
-                log_file.unlink()
-                pruned += 1
-        except Exception:
-            continue
-    
-    logger.info(f"Pruned {pruned} log files older than {retention_days} days")
-    return {"pruned": pruned, "message": f"Removed {pruned} log(s) older than {retention_days} days"}
+    log_dir = ROOT_DIR / "output" / "logs"
+    analyses_dir = ROOT_DIR / "output" / "analyses"
+    plots_dir = ROOT_DIR / "output" / "plots"
+
+    pruned = _prune_directory(log_dir, cutoff)
+    pruned += _prune_directory(analyses_dir, cutoff)
+    pruned += _prune_directory(plots_dir, cutoff)
+
+    logger.info(f"Pruned {pruned} files older than {retention_days} days")
+    return {"pruned": pruned, "message": f"Removed {pruned} file(s) older than {retention_days} days"}
 
 
 @app.get("/trends")
@@ -326,21 +353,19 @@ async def get_html_report(analysis_id: str):
     safe_date = _html.escape(entry.get('date', 'N/A'))
     safe_id = _html.escape(analysis_id)
 
-    # Find any plots for this run
-    plot_dir = ROOT_DIR / "temp_plots"
+    # Find the reliability plot for this run (persisted during analysis)
+    report_plot = ROOT_DIR / "output" / "plots" / f"{analysis_id}_reliability.png"
     reliability_b64 = ""
-    if plot_dir.exists():
-        for png in sorted(plot_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
-            with open(png, "rb") as pf:
-                reliability_b64 = base64.b64encode(pf.read()).decode("utf-8")
-            break
+    if report_plot.exists():
+        with open(report_plot, "rb") as pf:
+            reliability_b64 = base64.b64encode(pf.read()).decode("utf-8")
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Reliability Executive Report — {analysis_id}</title>
+<title>Reliability Executive Report — {safe_id}</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: #1e293b; max-width: 800px; margin: 0 auto; padding: 40px 20px; }}
@@ -465,7 +490,7 @@ async def save_config(data: dict):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.7.2", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.8.0", "timestamp": datetime.now().isoformat()}
 
 def _compute_aic(ll: float, k: int) -> float:
     """Shared AIC calculation: AIC = 2k - 2ln(L)"""
@@ -527,6 +552,7 @@ async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: fl
             })
 
         # 3. Plots
+        log_id = f"AN-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         plots_b64 = {}
         temp_plots = ROOT_DIR / "temp_plots"
         temp_plots.mkdir(exist_ok=True)
@@ -536,6 +562,12 @@ async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: fl
         intensity_plot = plot_failure_intensity(tt, curves_intensity, None, prefix)
         cat_plot = plot_categories(categorized, prefix)
 
+        # Persist the reliability plot so the HTML report can embed it later
+        if rel_plot and os.path.exists(rel_plot):
+            report_plot_dir = ROOT_DIR / "output" / "plots"
+            report_plot_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(rel_plot, report_plot_dir / f"{log_id}_reliability.png")
+
         for name, path in [("reliability", rel_plot), ("intensity", intensity_plot), ("categories", cat_plot)]:
             if path and os.path.exists(path):
                 with open(path, "rb") as f:
@@ -543,7 +575,6 @@ async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: fl
                 os.remove(path)
 
         # 4. Save to archive
-        log_id = f"AN-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         save_to_archive(log_id, filename, {
             "total_failures": n,
             "duration_hours": round(T, 2)
@@ -627,20 +658,30 @@ async def ingest_sentry(payload: dict):
 
     project_counts = {}
     try:
+        settings = load_persistent_settings()
         if project == "all":
-            t, categorized, t0, _, project_counts = await asyncio.to_thread(
-                load_sentry_failures_all,
-                org, auth_token, config_path, days,
-                load_persistent_settings().multi_label,
+            t, categorized, t0, _, project_counts = await asyncio.wait_for(
+                asyncio.to_thread(
+                    load_sentry_failures_all,
+                    org, auth_token, config_path, days,
+                    settings.multi_label,
+                ),
+                timeout=_ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/ALL_PROJECTS ({days}d)"
         else:
-            t, categorized, t0, _ = await asyncio.to_thread(
-                load_sentry_failures,
-                org, project, auth_token, config_path, days,
-                load_persistent_settings().multi_label,
+            t, categorized, t0, _ = await asyncio.wait_for(
+                asyncio.to_thread(
+                    load_sentry_failures,
+                    org, project, auth_token, config_path, days,
+                    settings.multi_label,
+                ),
+                timeout=_ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/{project} ({days}d)"
+    except asyncio.TimeoutError:
+        logger.error(f"Sentry ingest timed out for {org}/{project}")
+        raise HTTPException(status_code=504, detail="Sentry fetch timed out. Try a narrower time window or a single project.")
     except SentryError as e:
         logger.error(f"Sentry ingest failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -702,8 +743,8 @@ async def graphql_query(request: Request):
     if not query_str:
         raise HTTPException(status_code=400, detail="Missing 'query' field")
 
-    # Reject introspection queries (schema/type disclosure)
-    if "__schema" in query_str or "__type" in query_str:
+    # Reject introspection queries (schema/type disclosure), but allow __typename
+    if re.search(r'__schema\b|__type\b', query_str):
         raise HTTPException(status_code=403, detail="Introspection is disabled")
     
     try:

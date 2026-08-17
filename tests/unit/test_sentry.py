@@ -107,3 +107,19 @@ def test_normalize_raw_events_empty():
     assert len(t_hours) == 0
     assert len(cat_list) == 0
     assert t0 is not None
+
+
+def test_validate_slug_rejects_path_traversal():
+    from modeler.sentry import _validate_slug, SentryError
+    for bad in ["../etc/passwd", "foo/bar", "org/project", "", None, "..\\..\\x"]:
+        try:
+            _validate_slug(bad, "org")
+            assert False, f"Should have rejected {bad!r}"
+        except SentryError:
+            pass
+
+
+def test_validate_slug_accepts_valid():
+    from modeler.sentry import _validate_slug
+    assert _validate_slug("my-org", "org") == "my-org"
+    assert _validate_slug("web_app.v2", "project") == "web_app.v2"

@@ -6,13 +6,13 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ALLOWED_ORIGINS=http://localhost:3000
-      # Sentry integration (optional — uncomment and fill in to enable)
-      # - SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN}
-      # - SENTRY_BASE_URL=${SENTRY_BASE_URL:-https://sentry.io/api/0/}
-      # API key auth (optional — set to enable POST/PUT/DELETE protection)
-      # - RELIABILITY_API_KEY=${RELIABILITY_API_KEY}
+      # Shared secret for API auth. Set the same value in the ui service.
+      - RELIABILITY_API_KEY=${RELIABILITY_API_KEY:-}
+      # Sentry integration
+      - SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN:-}
+      - SENTRY_BASE_URL=${SENTRY_BASE_URL:-https://sentry.io/api/0/}
     volumes:
-      - fault_categories_data:/app/fault_categories.conf.ro
+      # Persist log archives, analyses, and plots across restarts
       - output_data:/app/output
 
   ui:
@@ -22,8 +22,10 @@ services:
     depends_on:
       - api
     environment:
-      - NEXT_PUBLIC_API_URL=http://api:8000
+      # Server-side API URL used by the Next.js proxy (not exposed to the browser)
+      - API_URL=http://api:8000
+      # Must match the API's RELIABILITY_API_KEY
+      - RELIABILITY_API_KEY=${RELIABILITY_API_KEY:-}
 
 volumes:
-  fault_categories_data:
   output_data:

@@ -153,7 +153,9 @@ class Query(graphene.ObjectType):
         freq = defaultdict(lambda: {"count": 0, "pagerank_sum": 0.0})
         examined = 0
 
-        for aid in list_available_analyses():
+        # Cap to the most recent 50 analyses to bound cost
+        analyses = list_available_analyses()[-50:]
+        for aid in analyses:
             categorized = _get_categorized_data(info, aid)
             if not categorized:
                 continue
@@ -221,11 +223,16 @@ class Query(graphene.ObjectType):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import json
+import re
 from pathlib import Path
 
 _BASE_DIR = Path(__file__).resolve().parent
-_ROOT_DIR = _BASE_DIR.parent.parent
+# Docker flat layout puts everything in /app; local dev uses web/api/.
+_ROOT_DIR = _BASE_DIR if (_BASE_DIR / "fault_categories.conf").exists() else _BASE_DIR.parent.parent
 _ANALYSES_DIR = _ROOT_DIR / "output" / "analyses"
+
+# Analysis IDs are generated as "AN-YYYYMMDD-HHMMSS"
+_ANALYSIS_ID_RE = re.compile(r'^AN-\d{8}-\d{6}$')
 
 # In-memory cache of categorized data keyed by analysis_id.
 # Persisted to output/analyses/{id}.json so GraphQL can query historical
@@ -255,6 +262,9 @@ def store_analysis_data(analysis_id: str, categorized_list: list):
 
 def _get_categorized_data(info, analysis_id: str) -> Optional[list]:
     """Retrieve stored categorized data — memory first, then disk fallback."""
+    # Validate the analysis ID format to prevent path traversal
+    if not _ANALYSIS_ID_RE.match(analysis_id):
+        return None
     if analysis_id in _analysis_store:
         return _analysis_store[analysis_id]
     # Disk fallback (survives restart)
@@ -275,7 +285,8 @@ def list_available_analyses() -> List[str]:
     ids = set(_analysis_store.keys())
     if _ANALYSES_DIR.exists():
         for f in _ANALYSES_DIR.glob("*.json"):
-            ids.add(f.stem)
+            if _ANALYSIS_ID_RE.match(f.stem):
+                ids.add(f.stem)
     return sorted(ids)
 
 

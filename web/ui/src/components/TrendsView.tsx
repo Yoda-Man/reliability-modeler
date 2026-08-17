@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Minus, Loader2, Calendar, BarChart3 } from 'lucide-react';
-import { apiFetch } from '@/app/api';
+import { apiFetch } from '@/app/apiClient';
 
 interface TrendRun {
     id: string;

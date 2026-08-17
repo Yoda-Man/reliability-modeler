@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -39,31 +40,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://sentry.io/api/0/"
 PAGE_SIZE = 100  # Sentry's max page size for the events endpoint
 MAX_PAGES = 50   # hard safety cap: 50 pages * 100 = 5000 events
+DEFAULT_MAX_PROJECTS = 50  # cap for "all projects" aggregation
+_SLUG_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
 
 
 class SentryError(Exception):
     """Raised when the Sentry API returns an error or auth fails."""
 
 
-def _sentry_request(url: str, auth_token: str) -> dict:
-    """Perform a single authenticated GET request against the Sentry API."""
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {auth_token}")
-    req.add_header("Accept", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        if e.code == 401:
-            raise SentryError("Sentry authentication failed (401). Check SENTRY_AUTH_TOKEN and its scopes.")
-        if e.code == 404:
-            raise SentryError(f"Sentry resource not found (404): {url}")
-        if e.code == 429:
-            raise SentryError("Sentry rate limit exceeded (429). Retry later or narrow the time window.")
-        raise SentryError(f"Sentry API error {e.code}: {body[:300]}")
-    except urllib.error.URLError as e:
-        raise SentryError(f"Sentry network error: {e.reason}")
+def _validate_slug(value: str, name: str) -> str:
+    """Validate a Sentry org/project slug (defense in depth against URL injection)."""
+    if not value or not _SLUG_RE.match(value):
+        raise SentryError(f"Invalid {name} slug: {value!r}")
+    return value
 
 
 def _sentry_get_page(url: str, auth_token: str) -> Tuple[List[dict], Optional[str]]:
@@ -80,14 +69,13 @@ def _sentry_get_page(url: str, auth_token: str) -> Tuple[List[dict], Optional[st
             next_cursor = _extract_next_cursor(resp.headers.get("Link", ""))
             return events, next_cursor
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
         if e.code == 401:
             raise SentryError("Sentry authentication failed (401). Check SENTRY_AUTH_TOKEN and its scopes.")
         if e.code == 404:
-            raise SentryError(f"Sentry resource not found (404): {url}")
+            raise SentryError("Sentry resource not found (404). Check the org/project slug.")
         if e.code == 429:
             raise SentryError("Sentry rate limit exceeded (429). Retry later or narrow the time window.")
-        raise SentryError(f"Sentry API error {e.code}: {body[:300]}")
+        raise SentryError(f"Sentry API error (HTTP {e.code})")
     except urllib.error.URLError as e:
         raise SentryError(f"Sentry network error: {e.reason}")
 
@@ -168,7 +156,8 @@ def list_sentry_projects(
     Returns a list of dicts with keys like: slug, name, platform, status.
     """
     base = (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-    url = f"{base}/organizations/{urllib.parse.quote(org)}/projects/"
+    org = _validate_slug(org, "org")
+    url = f"{base}/organizations/{urllib.parse.quote(org, safe='')}/projects/"
 
     projects: List[dict] = []
     next_cursor: Optional[str] = None
@@ -178,7 +167,7 @@ def list_sentry_projects(
         page_url = url
         if next_cursor:
             sep = "&" if "?" in page_url else "?"
-            page_url = f"{page_url}{sep}cursor={urllib.parse.quote(next_cursor)}"
+            page_url = f"{page_url}{sep}cursor={urllib.parse.quote(next_cursor, safe='')}"
 
         req = urllib.request.Request(page_url)
         req.add_header("Authorization", f"Bearer {auth_token}")
@@ -188,12 +177,11 @@ def list_sentry_projects(
                 data = json.loads(resp.read().decode("utf-8"))
                 next_cursor = _extract_next_cursor(resp.headers.get("Link", ""))
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
             if e.code == 401:
                 raise SentryError("Sentry authentication failed (401). Check SENTRY_AUTH_TOKEN scopes.")
             if e.code == 404:
-                raise SentryError(f"Sentry organization not found (404): {org}")
-            raise SentryError(f"Sentry API error {e.code}: {body[:300]}")
+                raise SentryError("Sentry organization not found (404). Check the org slug.")
+            raise SentryError(f"Sentry API error (HTTP {e.code})")
         except urllib.error.URLError as e:
             raise SentryError(f"Sentry network error: {e.reason}")
 
@@ -216,12 +204,14 @@ def _fetch_project_events(
     days: int,
 ) -> List[dict]:
     """Fetch raw event dicts for a single project, with pagination."""
+    org = _validate_slug(org, "org")
+    project = _validate_slug(project, "project")
     params = {
         "full": "false",
         "limit": str(PAGE_SIZE),
     }
     query_string = urllib.parse.urlencode(params)
-    url = f"{base}/projects/{urllib.parse.quote(org)}/{urllib.parse.quote(project)}/events/?{query_string}&statsPeriod={days}d"
+    url = f"{base}/projects/{urllib.parse.quote(org, safe='')}/{urllib.parse.quote(project, safe='')}/events/?{query_string}&statsPeriod={days}d"
 
     all_events: List[dict] = []
     next_cursor: Optional[str] = None
@@ -231,7 +221,7 @@ def _fetch_project_events(
         page_url = url
         if next_cursor:
             sep = "&" if "?" in page_url else "?"
-            page_url = f"{page_url}{sep}cursor={urllib.parse.quote(next_cursor)}"
+            page_url = f"{page_url}{sep}cursor={urllib.parse.quote(next_cursor, safe='')}"
 
         events, next_cursor = _sentry_get_page(page_url, auth_token)
         if not events:
@@ -335,8 +325,9 @@ def load_sentry_failures_all(
     base = (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
 
     projects = list_sentry_projects(org, auth_token, base)
-    if max_projects:
-        projects = projects[:max_projects]
+    if max_projects is None:
+        max_projects = DEFAULT_MAX_PROJECTS
+    projects = projects[:max_projects]
 
     if not projects:
         logger.warning(f"Sentry: no projects found in org '{org}'")

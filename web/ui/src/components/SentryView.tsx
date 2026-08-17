@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Bug, Loader2, Search, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { apiFetch } from '@/app/api';
+import { apiFetch } from '@/app/apiClient';
 
 interface SentryViewProps {
     onAnalyze: (org: string, project: string, days: number) => Promise<void>;

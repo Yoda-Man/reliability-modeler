@@ -5,6 +5,40 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2025-08-17
+
+### Security fixes (from full audit)
+- **Authentication fixed** — removed the client-side `NEXT_PUBLIC_API_KEY` (was
+  shipped in the JS bundle) and the GET bypass. Added a server-side Next.js proxy
+  (`/api/[...path]/route.ts`) that injects `RELIABILITY_API_KEY` server-side.
+  Auth now applies to all non-`/health` routes.
+- **GraphQL path traversal fixed** — analysis IDs validated against
+  `^AN-\d{8}-\d{6}$` before any disk access.
+- **Sentry slug injection fixed** — org/project slugs validated + URL-encoded
+  with `quote(safe='')`.
+- **Error disclosure** — Sentry error bodies and URLs no longer echoed to clients.
+- **Log-forging** — `X-Request-ID` sanitized to `[A-Za-z0-9-]`.
+- **Introspection** — precise regex (`__schema\b|__type\b`) that no longer
+  falsely blocks `__typename`.
+- **Non-root** — API container now runs as a non-root `appuser`.
+
+### Robustness fixes
+- **Fail-open warning** — startup logs a prominent warning when auth is disabled.
+- **`/logs/prune`** — `retention_days` validated (≥7), prunes logs + analyses + plots.
+- **Unbounded `project=all`** — capped at 50 projects and the entire fetch is
+  wrapped in `ANALYSIS_TIMEOUT_SECONDS`.
+- **HTML report chart** — reliability plot is now persisted to `output/plots/`
+  so executive reports actually embed the chart (was always empty).
+- **Corrupt settings.json** — `load_persistent_settings` now falls back to defaults.
+- **Dead code** — removed unused `_sentry_request`.
+- **ROOT_DIR** — Docker flat-layout detection so write paths resolve to `/app`
+  (fixes the compose volume mismatch).
+- **GraphQL cross-analysis DoS** — capped to the 50 most recent analyses.
+
+### Tests
+- 4 new security tests (slug validation, path traversal rejection, introspection regex).
+- 39/39 unit tests pass.
+
 ## [2.7.2] - 2025-08-08
 
 ### Added — Cross-analysis GraphQL query

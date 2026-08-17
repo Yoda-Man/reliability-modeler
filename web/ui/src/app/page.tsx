@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp, Bug } from 'lucide-react';
-import { apiFetch } from './api';
+import { apiFetch } from './apiClient';
 import Dashboard from '@/components/Dashboard';
 import MethodologyView from '@/components/Methodology';
 import ConfigView from '@/components/ConfigView';

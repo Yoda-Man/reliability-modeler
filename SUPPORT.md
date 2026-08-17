@@ -115,14 +115,15 @@ curl http://localhost:3000  # Should return HTML
 | `SENTRY_AUTH_TOKEN` | API | (required) | Sentry org token with `event:read` + `project:read` scope |
 | `SENTRY_BASE_URL` | API | `https://sentry.io/api/0/` | Override for self-hosted Sentry |
 | `ALLOWED_ORIGINS` | API | `http://localhost:3000` | Comma-separated CORS origins |
-| `RELIABILITY_API_KEY` | API | (empty = disabled) | Shared secret for POST/DELETE auth |
+| `RELIABILITY_API_KEY` | API + UI | (empty = disabled) | Shared secret. API validates it; UI proxy injects it server-side |
+| `API_URL` | UI | `http://localhost:8000` | Backend URL the Next.js proxy forwards to (server-side) |
 | `RATE_LIMIT_MAX` | API | `30` | Max requests per window |
 | `RATE_LIMIT_WINDOW` | API | `60` | Rate limit window (seconds) |
 | `ANALYSIS_TIMEOUT_SECONDS` | API | `120` | Max seconds per analysis request |
-| `NEXT_PUBLIC_API_URL` | UI | `http://localhost:8000` | API base URL |
-| `NEXT_PUBLIC_API_KEY` | UI | (empty) | API key sent from the UI (must match `RELIABILITY_API_KEY`) |
 | `DOCKERHUB_USERNAME` | Build | (required) | Docker Hub username for push |
 | `IMAGE_TAG` | Build | git hash | Docker image tag |
+
+> **Note on authentication:** `RELIABILITY_API_KEY` is a *shared secret* for a trusted internal network, not a cryptographic security boundary. The key is held server-side by the Next.js proxy (never shipped to the browser bundle) and required on all non-`/health` routes. When unset, auth is disabled and the API logs a warning at startup.
 
 ## 6. Escalation
 

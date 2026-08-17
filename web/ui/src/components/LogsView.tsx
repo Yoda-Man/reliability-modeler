@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { History, FileText, Calendar, Search, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
-import { apiFetch } from '@/app/api';
+import { apiFetch } from '@/app/apiClient';
 
 const PAGE_SIZE = 50;
 

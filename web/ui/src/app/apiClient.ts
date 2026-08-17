@@ -1,9 +1,9 @@
 /**
- * Shared API helper — includes X-API-Key header when configured.
+ * Shared API helper — routes through the same-origin Next.js proxy,
+ * which injects the API key server-side (never exposed to the browser).
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || '';
+const API_URL = '/api';
 
 interface FetchOptions extends RequestInit {
     timeout?: number;
@@ -13,12 +13,9 @@ export async function apiFetch(path: string, options: FetchOptions = {}): Promis
     const headers: Record<string, string> = {
         ...(options.headers as Record<string, string> || {}),
     };
-    if (API_KEY) {
-        headers['X-API-Key'] = API_KEY;
-    }
 
     const controller = new AbortController();
-    const timeout = options.timeout || 30000;
+    const timeout = options.timeout || 130000; // match the API's 120s analysis timeout
     const timer = setTimeout(() => controller.abort(), timeout);
 
     try {

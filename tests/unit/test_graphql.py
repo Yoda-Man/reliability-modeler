@@ -30,7 +30,7 @@ def _sample_categorized() -> list:
 
 
 def test_store_persists_to_disk():
-    analysis_id = "AN-TEST-GQL-PERSIST"
+    analysis_id = "AN-20250101-000001"
     data = _sample_categorized()
     store_analysis_data(analysis_id, data)
 
@@ -44,7 +44,7 @@ def test_store_persists_to_disk():
 
 def test_disk_fallback_after_restart():
     """Simulate restart: data on disk but not in memory."""
-    analysis_id = "AN-TEST-GQL-FALLBACK"
+    analysis_id = "AN-20250101-000002"
     data = _sample_categorized()
     store_analysis_data(analysis_id, data)
 
@@ -62,7 +62,7 @@ def test_disk_fallback_after_restart():
 
 
 def test_available_analyses_lists_ids():
-    analysis_id = "AN-TEST-GQL-LIST"
+    analysis_id = "AN-20250101-000003"
     store_analysis_data(analysis_id, _sample_categorized())
 
     ids = list_available_analyses()
@@ -74,7 +74,7 @@ def test_available_analyses_lists_ids():
 
 
 def test_schema_query_available_analyses():
-    analysis_id = "AN-TEST-GQL-QUERY"
+    analysis_id = "AN-20250101-000004"
     store_analysis_data(analysis_id, _sample_categorized())
 
     result = schema.execute("{ availableAnalyses }")
@@ -87,7 +87,7 @@ def test_schema_query_available_analyses():
 
 
 def test_schema_query_keystone_categories():
-    analysis_id = "AN-TEST-GQL-KEYSTONE"
+    analysis_id = "AN-20250101-000005"
     store_analysis_data(analysis_id, _sample_categorized())
 
     query = '{ keystoneCategories(analysisId: "%s", limit: 5) { node pagerank isKeystone } }' % analysis_id
@@ -105,8 +105,8 @@ def test_schema_query_keystone_categories():
 def test_cross_analysis_keystone_frequency():
     """Categories that are keystone in multiple analyses should rank first."""
     # Two analyses that both have 'Database' as a keystone category
-    id1 = "AN-TEST-GQL-X1"
-    id2 = "AN-TEST-GQL-X2"
+    id1 = "AN-20250101-000006"
+    id2 = "AN-20250101-000007"
     store_analysis_data(id1, _sample_categorized())
     store_analysis_data(id2, _sample_categorized())
 
@@ -126,3 +126,17 @@ def test_cross_analysis_keystone_frequency():
     (_ANALYSES_DIR / f"{id1}.json").unlink(missing_ok=True)
     (_ANALYSES_DIR / f"{id2}.json").unlink(missing_ok=True)
     _analysis_store.clear()
+
+
+def test_path_traversal_rejected():
+    """Malicious analysis IDs must be rejected (H2 fix)."""
+    for bad in ["../../../etc/passwd", "..%2F..%2Fetc", "AN-../settings", "AN-20250101-000001/../../x"]:
+        assert _get_categorized_data(None, bad) is None, f"Should reject {bad!r}"
+
+
+def test_introspection_rejected():
+    """Introspection queries are blocked (schema disclosure)."""
+    import re
+    # __schema is blocked, __typename is allowed
+    assert re.search(r'__schema\b|__type\b', '{ __schema { types { name } } }')
+    assert not re.search(r'__schema\b|__type\b', '{ availableAnalyses }')
