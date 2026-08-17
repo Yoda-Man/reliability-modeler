@@ -95,6 +95,9 @@ The failure graph data is queryable via GraphQL at `POST /graphql`. After each S
     centralityScores { node pagerank isKeystone }
   }
 }
+
+# Which category is CONSISTENTLY keystone across every analysis?
+{ keystoneCategoriesAcross(limit: 10) { node keystoneCount avgPagerank totalAnalyses } }
 ```
 
 ## Development

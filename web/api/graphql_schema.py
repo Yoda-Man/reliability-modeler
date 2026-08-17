@@ -40,6 +40,13 @@ class CommunityClusterType(graphene.ObjectType):
     internal_density = graphene.Float(description="Edges inside / possible edges inside")
 
 
+class KeystoneFrequencyType(graphene.ObjectType):
+    node = graphene.String(description="Category name")
+    keystone_count = graphene.Int(description="Number of analyses where this category was keystone")
+    avg_pagerank = graphene.Float(description="Average PageRank across all analyses")
+    total_analyses = graphene.Int(description="Total analyses examined")
+
+
 class CooccurrenceEdgeType(graphene.ObjectType):
     source = graphene.String()
     target = graphene.String()
@@ -130,8 +137,46 @@ class Query(graphene.ObjectType):
         description="List all analysis IDs available for graph querying (memory + disk)",
     )
 
+    keystone_categories_across = graphene.List(
+        KeystoneFrequencyType,
+        limit=graphene.Int(default_value=10),
+        description="Categories most consistently keystone across ALL analyses",
+    )
+
     def resolve_available_analyses(self, info):
         return list_available_analyses()
+
+    def resolve_keystone_categories_across(self, info, limit=10):
+        from modeler.graphs import build_failure_graphs
+        from collections import defaultdict
+
+        freq = defaultdict(lambda: {"count": 0, "pagerank_sum": 0.0})
+        examined = 0
+
+        for aid in list_available_analyses():
+            categorized = _get_categorized_data(info, aid)
+            if not categorized:
+                continue
+            report = build_failure_graphs(categorized)
+            if report is None:
+                continue
+            examined += 1
+            for c in report.centrality:
+                if c.is_keystone:
+                    freq[c.node]["count"] += 1
+                    freq[c.node]["pagerank_sum"] += c.pagerank
+
+        result = []
+        for node, d in freq.items():
+            result.append({
+                "node": node,
+                "keystone_count": d["count"],
+                "avg_pagerank": round(d["pagerank_sum"] / max(1, d["count"]), 6),
+                "total_analyses": examined,
+            })
+
+        result.sort(key=lambda x: (-x["keystone_count"], -x["avg_pagerank"]))
+        return result[:limit]
 
     def resolve_failure_graph(self, info, analysis_id, cascade_window_hours=2.0, min_cooccurrence=3):
         from modeler.graphs import build_failure_graphs

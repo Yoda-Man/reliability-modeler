@@ -100,3 +100,29 @@ def test_schema_query_keystone_categories():
     # Cleanup
     (_ANALYSES_DIR / f"{analysis_id}.json").unlink(missing_ok=True)
     _analysis_store.pop(analysis_id, None)
+
+
+def test_cross_analysis_keystone_frequency():
+    """Categories that are keystone in multiple analyses should rank first."""
+    # Two analyses that both have 'Database' as a keystone category
+    id1 = "AN-TEST-GQL-X1"
+    id2 = "AN-TEST-GQL-X2"
+    store_analysis_data(id1, _sample_categorized())
+    store_analysis_data(id2, _sample_categorized())
+
+    query = '{ keystoneCategoriesAcross(limit: 10) { node keystoneCount totalAnalyses } }'
+    result = schema.execute(query)
+    assert result.errors is None, f"GraphQL query failed: {result.errors}"
+    rows = result.data["keystoneCategoriesAcross"]
+
+    assert isinstance(rows, list)
+    assert len(rows) > 0, "Should return at least one category"
+    assert rows[0]["totalAnalyses"] == 2, "Both analyses should be examined"
+    # Every row should have a keystone count between 1 and total analyses
+    for row in rows:
+        assert 1 <= row["keystoneCount"] <= 2
+
+    # Cleanup
+    (_ANALYSES_DIR / f"{id1}.json").unlink(missing_ok=True)
+    (_ANALYSES_DIR / f"{id2}.json").unlink(missing_ok=True)
+    _analysis_store.clear()
