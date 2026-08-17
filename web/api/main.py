@@ -31,6 +31,7 @@ from modeler.data import load_failure_data, categorize_description, load_fault_c
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
 from modeler.graphs import build_failure_graphs, generate_graph_insights
+from modeler.sentry import load_sentry_failures, SentryError
 try:
     from .graphql_schema import schema, store_analysis_data
 except ImportError:
@@ -48,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.4.0")
+app = FastAPI(title="Reliability Modeler API", version="2.5.0")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -511,7 +512,7 @@ async def analyze_failure_data(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.4.0", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "version": "2.5.0", "timestamp": datetime.now().isoformat()}
 
 @app.get("/sample-data")
 async def analyze_sample_data():
@@ -535,22 +536,38 @@ def _compute_aic(ll: float, k: int) -> float:
     return 2 * k - 2 * ll
 
 async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: float):
+    """Load failure data from CSV and run the full analysis pipeline."""
+    settings = load_persistent_settings()
+    if settings.optimization_method not in VALID_OPTIMIZATION_METHODS:
+        settings.optimization_method = "L-BFGS-B"
+
+    config_path = ROOT_DIR / "fault_categories.conf"
+    if not config_path.exists():
+        config_path = Path("/app/fault_categories.conf")
+
+    # 1. Load data
+    t, categorized, t0, fault_categories = load_failure_data(
+        csv_path, config_path, multi_label=settings.multi_label
+    )
+    if len(t) == 0:
+        raise HTTPException(status_code=400, detail="No valid failure data found in CSV. Ensure the file has timestamp and description columns.")
+
+    try:
+        return await _analyze_from_data(t, categorized, t0, filename, future_hours)
+    finally:
+        if csv_path.parent.name == "temp_uploads" and csv_path.exists():
+            try:
+                csv_path.unlink()
+            except Exception:
+                pass
+
+
+async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: float):
+    """Core analysis: fit models, build plots, archive, and graph — from already-normalized data."""
     try:
         settings = load_persistent_settings()
         if settings.optimization_method not in VALID_OPTIMIZATION_METHODS:
             settings.optimization_method = "L-BFGS-B"
-        
-        config_path = ROOT_DIR / "fault_categories.conf"
-        if not config_path.exists():
-            config_path = Path("/app/fault_categories.conf")
-            
-        # 1. Load data
-        t, categorized, t0, fault_categories = load_failure_data(
-            csv_path, config_path, multi_label=settings.multi_label
-        )
-        
-        if len(t) == 0:
-            raise HTTPException(status_code=400, detail="No valid failure data found in CSV. Ensure the file has timestamp and description columns.")
 
         # 2. Fit models
         T = float(t[-1])
@@ -663,13 +680,58 @@ async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: flo
         raise
     except Exception as e:
         logger.error(f"Pipeline error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Analysis failed. Please check your CSV format and try again.")
-    finally:
-        if csv_path.parent.name == "temp_uploads" and csv_path.exists():
-            try:
-                csv_path.unlink()
-            except Exception:
-                pass
+        raise HTTPException(status_code=500, detail="Analysis failed. Please check your data and try again.")
+
+@app.post("/ingest/sentry")
+async def ingest_sentry(payload: dict):
+    """
+    Pull failure events from Sentry and run the reliability analysis.
+
+    Body:
+        {"org": "my-org", "project": "my-project", "days": 30, "future_hours": 1000}
+
+    Requires SENTRY_AUTH_TOKEN env var to be set on the API server.
+    """
+    org = payload.get("org")
+    project = payload.get("project")
+    if not org or not project:
+        raise HTTPException(status_code=400, detail="Both 'org' and 'project' are required")
+
+    auth_token = os.getenv("SENTRY_AUTH_TOKEN", "")
+    if not auth_token:
+        raise HTTPException(status_code=503, detail="SENTRY_AUTH_TOKEN not configured on the API server")
+
+    days = int(payload.get("days", 30))
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="'days' must be between 1 and 365")
+
+    future_hours = float(payload.get("future_hours", 1000.0))
+    if not np.isfinite(future_hours) or future_hours < MIN_FUTURE_HOURS or future_hours > MAX_FUTURE_HOURS:
+        raise HTTPException(status_code=400, detail=f"future_hours must be between {MIN_FUTURE_HOURS} and {MAX_FUTURE_HOURS}")
+
+    config_path = ROOT_DIR / "fault_categories.conf"
+    if not config_path.exists():
+        config_path = Path("/app/fault_categories.conf")
+
+    try:
+        t, categorized, t0, _ = await asyncio.to_thread(
+            load_sentry_failures,
+            org, project, auth_token, config_path, days,
+            load_persistent_settings().multi_label,
+        )
+    except SentryError as e:
+        logger.error(f"Sentry ingest failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if len(t) == 0:
+        raise HTTPException(status_code=400, detail=f"No failure events found in Sentry for {org}/{project} in the last {days} days")
+
+    filename = f"sentry://{org}/{project} ({days}d)"
+    return await asyncio.wait_for(
+        _analyze_from_data(t, categorized, t0, filename, future_hours),
+        timeout=_ANALYSIS_TIMEOUT_SECONDS
+    )
+
 
 @app.post("/graphql")
 async def graphql_query(request: Request):

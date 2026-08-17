@@ -164,6 +164,10 @@ curl http://localhost:3000  # Should return HTML
 | `RATE_LIMIT_MAX` | API | `30` | Max requests per window |
 | `RATE_LIMIT_WINDOW` | API | `60` | Rate limit window (seconds) |
 | `NEXT_PUBLIC_API_URL` | UI | `http://localhost:8000` | API base URL |
+| `NEXT_PUBLIC_API_KEY` | UI | (empty) | API key sent from the UI (must match `RELIABILITY_API_KEY`) |
+| `SENTRY_AUTH_TOKEN` | API | (empty) | Sentry org token with `event:read` scope — enables Sentry integration |
+| `SENTRY_BASE_URL` | API | `https://sentry.io/api/0/` | Override for self-hosted Sentry |
+| `ANALYSIS_TIMEOUT_SECONDS` | API | `120` | Max seconds for a single analysis request |
 | `DOCKERHUB_USERNAME` | Build | (required) | Docker Hub username for push |
 | `IMAGE_TAG` | Build | git hash | Docker image tag |
 

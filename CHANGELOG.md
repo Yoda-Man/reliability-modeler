@@ -5,6 +5,32 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2025-08-08
+
+### Added — Sentry Integration
+- **`modeler/sentry.py`** — connector that pulls failure events from the Sentry
+  API and normalizes them into the exact same shape `load_failure_data()` produces,
+  so the entire downstream pipeline (models, graphs, dashboard) works unchanged.
+- **`POST /ingest/sentry`** endpoint — accepts `{org, project, days, future_hours}`,
+  pulls events via cursor-paginated requests, and returns a full analysis.
+- **Sentry tab in the UI** — org/project/days form + "Pull & Analyze" button,
+  reuses the existing Dashboard. Setup requirements shown inline.
+- **9 unit tests** for the connector (cursor parsing, timestamp parsing,
+  description building with release/environment/exception context).
+
+### Changed
+- `run_analysis_pipeline` refactored into a core `_analyze_from_data()` that accepts
+  pre-normalized data — enables non-CSV ingestion sources.
+- Env vars documented: `SENTRY_AUTH_TOKEN`, `SENTRY_BASE_URL`,
+  `NEXT_PUBLIC_API_KEY`, `ANALYSIS_TIMEOUT_SECONDS`.
+- Version bumped to 2.5.0.
+
+### Design notes
+- Sentry events are counted as individual occurrences (not unique issues) for
+  accurate MTBF math.
+- Pagination capped at 50 pages (5000 events) with cursor-based Link-header parsing.
+- Uses only stdlib (`urllib`) — no new runtime dependency.
+
 ## [2.4.0] - 2025-08-08
 
 ### Error Resilience

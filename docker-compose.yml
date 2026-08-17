@@ -6,6 +6,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ALLOWED_ORIGINS=http://localhost:3000
+      # Sentry integration (optional — uncomment and fill in to enable)
+      # - SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN}
+      # - SENTRY_BASE_URL=${SENTRY_BASE_URL:-https://sentry.io/api/0/}
+      # API key auth (optional — set to enable POST/PUT/DELETE protection)
+      # - RELIABILITY_API_KEY=${RELIABILITY_API_KEY}
     volumes:
       - fault_categories_data:/app/fault_categories.conf.ro
       - output_data:/app/output

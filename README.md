@@ -101,6 +101,19 @@ python -m pytest tests/integration/ -v
 | GET | `/config` | Get current fault taxonomy and settings |
 | POST | `/config` | Update fault taxonomy and engine settings |
 | GET | `/logs` | List archived analysis sessions |
+| GET | `/trends` | Cross-run MTBF and failure-rate comparison |
+| POST | `/ingest/sentry` | Pull failure events from Sentry and analyze |
+| POST | `/graphql` | GraphQL endpoint for failure graph queries |
+
+## 🐛 Sentry Integration
+
+Pull raw failure events directly from Sentry — no CSV export needed:
+
+1. Create a Sentry auth token with `event:read` and `project:read` scope.
+2. Set `SENTRY_AUTH_TOKEN` on the API server (and `SENTRY_BASE_URL` for self-hosted Sentry).
+3. Open the **Sentry** tab in the UI, enter your org and project slug, choose a look-back window, and click **Pull & Analyze**.
+
+Events are counted as individual occurrences (not unique issues) for accurate MTBF modeling, and categorized using your existing `fault_categories.conf` taxonomy.
 
 ## 🔒 Security
 

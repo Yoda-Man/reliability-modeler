@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp } from 'lucide-react';
+import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp, Bug } from 'lucide-react';
 import { apiFetch } from './api';
 import FileUpload from '@/components/FileUpload';
 import Dashboard from '@/components/Dashboard';
@@ -9,6 +9,7 @@ import MethodologyView from '@/components/Methodology';
 import ConfigView from '@/components/ConfigView';
 import LogsView from '@/components/LogsView';
 import TrendsView from '@/components/TrendsView';
+import SentryView from '@/components/SentryView';
 import UserManualView from '@/components/UserManualView';
 import PrivacyPolicy from '@/components/PrivacyPolicy';
 import AboutView from '@/components/AboutView';
@@ -59,9 +60,39 @@ export default function Home() {
     }
   };
 
+  const handleSentryAnalyze = async (org: string, project: string, days: number) => {
+    setIsAnalyzing(true);
+    try {
+      const response = await apiFetch('/ingest/sentry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org, project, days, future_hours: futureHours }),
+      });
+
+      if (!response.ok) {
+        let detail = 'Failed to pull data from Sentry.';
+        try {
+          const errBody = await response.json();
+          detail = errBody.detail || detail;
+        } catch { /* ignore parse errors */ }
+        throw new Error(detail);
+      }
+
+      const data = await response.json();
+      setResults(data);
+      setActiveTab('dashboard');
+    } catch (error: any) {
+      console.error('Error pulling from Sentry:', error);
+      throw error; // re-throw so SentryView can display it
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   const renderContent = () => {
     if (activeTab === 'methodology') return <MethodologyView />;
     if (activeTab === 'trends') return <TrendsView />;
+    if (activeTab === 'sentry') return <SentryView onAnalyze={handleSentryAnalyze} isLoading={isAnalyzing} />;
     if (activeTab === 'logs') return <LogsView />;
     if (activeTab === 'config') return <ConfigView />;
     if (activeTab === 'user-manual') return <UserManualView />;
@@ -170,6 +201,12 @@ export default function Home() {
             label="Trends"
             active={activeTab === 'trends'}
             onClick={() => { setActiveTab('trends'); setIsSidebarOpen(false); }}
+          />
+          <NavItem
+            icon={<Bug size={18} />}
+            label="Sentry"
+            active={activeTab === 'sentry'}
+            onClick={() => { setActiveTab('sentry'); setIsSidebarOpen(false); }}
           />
           <NavItem
             icon={<Settings size={18} />}
