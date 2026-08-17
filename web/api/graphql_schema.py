@@ -104,7 +104,7 @@ class Query(graphene.ObjectType):
 
     failure_graph = graphene.Field(
         FailureGraphReportType,
-        analysis_id=graphene.String(required=True, description="Analysis ID from /analyze"),
+        analysis_id=graphene.String(required=True, description="Analysis ID from /ingest/sentry"),
         cascade_window_hours=graphene.Float(default_value=2.0),
         min_cooccurrence=graphene.Int(default_value=3),
         description="Get the full failure graph report for a specific analysis run",
@@ -185,4 +185,4 @@ def _get_categorized_data(info, analysis_id: str) -> Optional[list]:
     return _analysis_store.get(analysis_id)
 
 
-schema = graphene.Schema(query=Query, introspection=False)
+schema = graphene.Schema(query=Query)

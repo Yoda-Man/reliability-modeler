@@ -2,17 +2,15 @@ import os
 import sys
 import uuid
 import logging
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import io
 from pathlib import Path
 from datetime import datetime
 import base64
@@ -27,7 +25,7 @@ import asyncio
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append("/app")
 
-from modeler.data import load_failure_data, categorize_description, load_fault_categories
+from modeler.data import categorize_description, load_fault_categories
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
 from modeler.graphs import build_failure_graphs, generate_graph_insights
@@ -49,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.6.0")
+app = FastAPI(title="Reliability Modeler API", version="2.7.0")
 
 
 # ── Startup config persistence check ─────────────────────────────────────────
@@ -107,7 +105,6 @@ app.add_middleware(
 API_KEY = os.getenv("RELIABILITY_API_KEY", "")
 AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json"}
 _ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
-_SAMPLE_CACHE: dict | None = None  # cached sample data result
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
@@ -162,7 +159,6 @@ async def request_id_middleware(request: Request, call_next):
     response.headers["X-Request-ID"] = req_id
     return response
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 VALID_OPTIMIZATION_METHODS = {"L-BFGS-B", "TNC", "SLSQP", "Nelder-Mead"}
 MIN_FUTURE_HOURS = 1
 MAX_FUTURE_HOURS = 100000
@@ -467,100 +463,13 @@ async def save_config(data: dict):
             
     return {"status": "success"}
 
-@app.post("/analyze")
-async def analyze_failure_data(
-    file: UploadFile = File(...),
-    future_hours: float = 1000.0,
-):
-    # Validate future_hours
-    if not np.isfinite(future_hours) or future_hours < MIN_FUTURE_HOURS or future_hours > MAX_FUTURE_HOURS:
-        raise HTTPException(status_code=400, detail=f"future_hours must be between {MIN_FUTURE_HOURS} and {MAX_FUTURE_HOURS}")
-
-    # Validate file size
-    contents = await file.read()
-    if len(contents) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=400, detail=f"File exceeds maximum size of {MAX_UPLOAD_BYTES // (1024*1024)} MB")
-    if len(contents) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-    # Validate MIME type and extension
-    if file.content_type and file.content_type not in ("text/csv", "application/csv", "text/plain", "application/octet-stream"):
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}. Please upload a CSV file.")
-
-    # Sanitize: use UUID filename to prevent path traversal
-    safe_filename = f"{uuid.uuid4().hex}.csv"
-    temp_uploads = ROOT_DIR / "temp_uploads"
-    temp_uploads.mkdir(exist_ok=True)
-    csv_path = temp_uploads / safe_filename
-    with open(csv_path, "wb") as f:
-        f.write(contents)
-
-    # Quick CSV structure check
-    try:
-        first_line = contents.split(b'\n', 1)[0].decode('utf-8', errors='replace')
-        if ',' not in first_line:
-            os.remove(csv_path)
-            raise HTTPException(status_code=400, detail="File does not appear to be a valid CSV (no comma separators found)")
-    except UnicodeDecodeError:
-        os.remove(csv_path)
-        raise HTTPException(status_code=400, detail="File is not valid UTF-8 text")
-    
-    return await asyncio.wait_for(
-        run_analysis_pipeline(csv_path, file.filename or "uploaded.csv", future_hours),
-        timeout=_ANALYSIS_TIMEOUT_SECONDS
-    )
-
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.6.0", "timestamp": datetime.now().isoformat()}
-
-@app.get("/sample-data")
-async def analyze_sample_data():
-    global _SAMPLE_CACHE
-    if _SAMPLE_CACHE is not None:
-        return _SAMPLE_CACHE
-
-    sample_path = BASE_DIR / "sample_data.csv"
-    if not sample_path.exists():
-        sample_path = Path("/app/sample_data.csv")
-    
-    if not sample_path.exists():
-        raise HTTPException(status_code=404, detail="Sample data not found")
-        
-    result = await run_analysis_pipeline(sample_path, "sample_data.csv", 1000.0)
-    _SAMPLE_CACHE = result  # cache for subsequent requests
-    return result
+    return {"status": "ok", "version": "2.7.0", "timestamp": datetime.now().isoformat()}
 
 def _compute_aic(ll: float, k: int) -> float:
     """Shared AIC calculation: AIC = 2k - 2ln(L)"""
     return 2 * k - 2 * ll
-
-async def run_analysis_pipeline(csv_path: Path, filename: str, future_hours: float):
-    """Load failure data from CSV and run the full analysis pipeline."""
-    settings = load_persistent_settings()
-    if settings.optimization_method not in VALID_OPTIMIZATION_METHODS:
-        settings.optimization_method = "L-BFGS-B"
-
-    config_path = ROOT_DIR / "fault_categories.conf"
-    if not config_path.exists():
-        config_path = Path("/app/fault_categories.conf")
-
-    # 1. Load data
-    t, categorized, t0, fault_categories = load_failure_data(
-        csv_path, config_path, multi_label=settings.multi_label
-    )
-    if len(t) == 0:
-        raise HTTPException(status_code=400, detail="No valid failure data found in CSV. Ensure the file has timestamp and description columns.")
-
-    try:
-        return await _analyze_from_data(t, categorized, t0, filename, future_hours)
-    finally:
-        if csv_path.parent.name == "temp_uploads" and csv_path.exists():
-            try:
-                csv_path.unlink()
-            except Exception:
-                pass
-
 
 async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: float):
     """Core analysis: fit models, build plots, archive, and graph — from already-normalized data."""
@@ -792,6 +701,10 @@ async def graphql_query(request: Request):
     
     if not query_str:
         raise HTTPException(status_code=400, detail="Missing 'query' field")
+
+    # Reject introspection queries (schema/type disclosure)
+    if "__schema" in query_str or "__type" in query_str:
+        raise HTTPException(status_code=403, detail="Introspection is disabled")
     
     try:
         result = schema.execute(query_str, variable_values=variables)

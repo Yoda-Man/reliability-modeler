@@ -1,7 +1,8 @@
 """
 Sentry Connector — pull raw failure events from Sentry and normalize them
-into the exact same shape `load_failure_data()` produces, so the entire
-downstream pipeline (models, graphs, dashboard) works unchanged.
+into the shape the analysis pipeline expects:
+    (t_hours, cat_list, t0, fault_categories)
+where cat_list = [(iso, hours, categories, desc), ...]
 
 Usage:
     from modeler.sentry import load_sentry_failures
@@ -288,8 +289,8 @@ def load_sentry_failures(
     base_url: Optional[str] = None,
 ) -> Tuple[np.ndarray, List[Tuple], datetime, Optional[list]]:
     """
-    Pull failure events from a single Sentry project and return the SAME
-    normalized tuple that `load_failure_data()` returns:
+    Pull failure events from a single Sentry project and return the normalized
+    tuple the analysis pipeline expects:
         (t_hours: np.ndarray, cat_list: [(iso, hours, categories, desc)], t0: datetime, fault_categories)
     """
     fault_categories = load_fault_categories(config_path)

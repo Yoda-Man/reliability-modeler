@@ -2,13 +2,13 @@
 
 ## 1. Service Overview
 
-The Reliability Modeler is a two-tier containerized application:
+The Reliability Modeler is a two-tier containerized application that ingests failure data **exclusively from Sentry**:
 
 ```
-┌──────────────┐     HTTP :8000     ┌──────────────┐
-│   Next.js UI │ ─────────────────▶ │  FastAPI API │
-│   Port 3000  │                    │   Port 8000  │
-└──────────────┘                    └──────┬───────┘
+┌──────────────┐     HTTP :8000     ┌──────────────┐     ┌─────────────┐
+│   Next.js UI │ ─────────────────▶ │  FastAPI API │ ──▶ │    Sentry    │
+│   Port 3000  │                    │   Port 8000  │     │  API (pull)  │
+└──────────────┘                    └──────┬───────┘     └─────────────┘
                                           │
                                           ▼
                                     ┌──────────┐
@@ -17,8 +17,9 @@ The Reliability Modeler is a two-tier containerized application:
                                     └──────────┘
 ```
 
-- **API**: Python 3.14+ FastAPI server. CPU-bound (scipy optimization, matplotlib rendering).
-- **UI**: Next.js 16 static + client-rendered SPA. Talks to API exclusively.
+- **API**: Python 3.13+ FastAPI server. CPU-bound (scipy optimization, matplotlib rendering).
+- **UI**: Next.js 16 client-rendered SPA. Talks to API exclusively.
+- **Data source**: Sentry (pulled on demand). No CSV upload, no CLI.
 - **No database**: State is file-based (JSON log archives, settings.json, fault_categories.conf).
 
 ### ⚠️ Critical: Config Persistence
@@ -27,85 +28,45 @@ The Reliability Modeler is a two-tier containerized application:
 
 | Deployment | What you need |
 |------------|---------------|
-| **Docker Compose** | Mount a volume: `volumes: - ./config:/app` (see `docker-compose.yml`) |
+| **Docker Compose** | Mount a volume (see `docker-compose.yml`) |
 | **Kubernetes** | Create a `PersistentVolumeClaim` and mount it at `/app` in the API pod |
-| **Bare metal** | Set `FAULT_CATEGORIES_PATH` and `SETTINGS_PATH` env vars pointing to persistent storage |
+| **Bare metal** | Point config paths at persistent storage |
 
-**Kubernetes example:**
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: reliability-modeler-config
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  template:
-    spec:
-      containers:
-      - name: api
-        image: trustaldo/reliability-modeler-api:latest
-        volumeMounts:
-        - name: config
-          mountPath: /app
-        env:
-        - name: FAULT_CATEGORIES_PATH
-          value: /app/fault_categories.conf
-      volumes:
-      - name: config
-        persistentVolumeClaim:
-          claimName: reliability-modeler-config
-```
-
-The startup banner in the API logs will warn if write targets are on ephemeral storage. Check `docker logs` after deploy.
+The startup log warns if write targets are on ephemeral storage. Check `docker logs` after deploy.
 
 ## 2. Common Failure Modes & Remedies
 
-### 2.1 "500 Internal Server Error" from /analyze
+### 2.1 "No failure events found" from Sentry ingest
 
 **Likely causes:**
-1. **CSV format mismatch**: Timestamp column is unparseable or missing.
-   - *Fix*: Verify CSV has at least a timestamp column. Check that dates are in ISO format or relative hours.
-   - *Log grep*: Look for `"Skipped N rows"` in API logs.
+1. **Bad or missing token** — `SENTRY_AUTH_TOKEN` not set, expired, or lacks `event:read` scope.
+   - *Fix*: Verify the token, check scopes in Sentry's "Auth Tokens" page.
+2. **Wrong org/project slug** — slugs are case-sensitive.
+   - *Fix*: Use `GET /ingest/sentry/projects?org=X` to list exact slugs.
+3. **No events in the look-back window** — the project had no errors in the selected period.
+   - *Fix*: Increase the day range or check Sentry directly.
 
-2. **Model convergence failure**: Data is too sparse (< 3 failure events) or all timestamps are identical.
-   - *Fix*: Try `Nelder-Mead` optimizer in Config → Advanced Engine Settings. Ensure at least 3 distinct timestamps.
+### 2.2 "502 Bad Gateway" on `/ingest/sentry`
 
-3. **Memory exhaustion on large CSV**: >100MB file or >50,000 rows.
-   - *Fix*: The API enforces a 10MB upload limit. If legitimate data exceeds this, increase `MAX_UPLOAD_BYTES` in `web/api/main.py`.
+Sentry returned an error (401 auth, 404 not found, 429 rate-limited, or network failure). The API logs the specific reason. Check `docker logs` and grep for `Sentry ingest failed`.
 
-### 2.2 "429 Too Many Requests"
+### 2.3 "429 Too Many Requests" (Sentry rate limit)
 
-Rate limiting is active: 30 requests per 60 seconds per client IP. Adjust via env vars:
-- `RATE_LIMIT_MAX`: max requests per window (default 30)
-- `RATE_LIMIT_WINDOW`: window size in seconds (default 60)
+Pulling "all projects" across a large org can hit Sentry's API rate limits. Narrow the look-back window, or analyze a single project at a time. The connector caps 5000 events per project and skips failures gracefully.
 
-### 2.3 Config changes not persisting after container restart
+### 2.4 Model fails to converge (NaN/empty results)
 
-`fault_categories.conf` and `settings.json` are written to the container filesystem. If the container is rebuilt, changes are lost. Use a Docker volume mount:
+Data is too sparse (< 3 events) or all timestamps are identical. Narrow the scope to a busier project or widen the time window.
 
-```yaml
-volumes:
-  - ./fault_categories.conf:/app/fault_categories.conf
-  - ./settings.json:/app/web/api/settings.json
-```
+### 2.5 Config changes not persisting after container restart
 
-### 2.4 UI shows "Failed to analyze the file"
+Use a Docker volume mount for `fault_categories.conf` and `settings.json` (see section 1).
 
-- Check that `NEXT_PUBLIC_API_URL` is set correctly in the UI container.
-- Verify the API container is reachable from the UI container on port 8000.
-- Check browser console for CORS errors. Ensure `ALLOWED_ORIGINS` includes the UI origin.
+### 2.6 UI shows "Failed to pull data from Sentry"
 
-### 2.5 AIC values differ between CLI and Web UI
-
-Both now use the same formula: `AIC = 2k - 2·ln(L)`. If you still see discrepancies, verify the same settings (optimizer, tolerance) are used.
+- Check `SENTRY_AUTH_TOKEN` is set on the API container (not the UI).
+- Verify `NEXT_PUBLIC_API_URL` points at the API.
+- Check browser console for CORS errors — ensure `ALLOWED_ORIGINS` includes the UI origin.
 
 ## 3. Logging & Monitoring
 
@@ -113,30 +74,23 @@ Both now use the same formula: `AIC = 2k - 2·ln(L)`. If you still see discrepan
 - Format: JSON-structured to stdout
 - Fields: `time`, `level`, `logger`, `message`
 - Each request gets an `X-Request-ID` header for correlation.
-- Log level: `INFO` by default. Set `LOG_LEVEL=DEBUG` for verbose output.
+- Log level: `INFO` by default.
 
 ```bash
-# View API logs
 docker logs reliability-modeler-api-1
-
-# Stream with filtering
 docker logs -f reliability-modeler-api-1 2>&1 | grep '"level": "ERROR"'
 ```
 
 ### Health Checks
-- **Endpoint**: `GET /health` → `{"status": "ok", "version": "2.0.1", "timestamp": "..."}`
-- Use this for load balancer health probes. Expected: HTTP 200, response within 100ms.
-
-### CLI Logs
-- Written to `output/YYYY/MM/DD/run_HHMMSS.log` (structured text format).
-- Console output if `--silent` is not set.
+- **Endpoint**: `GET /health` → `{"status": "ok", "version": "2.7.0", "timestamp": "..."}`
+- Use for load balancer probes. Expected: HTTP 200, response < 100ms.
 
 ## 4. Deployment & Rollback
 
 ### Deploy
 ```bash
 # Build and push images
-make build push IMAGE_TAG=v2.0.1
+make build push IMAGE_TAG=v2.7.0
 
 # On target host
 docker-compose pull
@@ -145,8 +99,7 @@ docker-compose up -d
 
 ### Rollback
 ```bash
-# Revert to previous tag
-IMAGE_TAG=v2.0.0 docker-compose up -d
+IMAGE_TAG=v2.6.0 docker-compose up -d
 ```
 
 ### Verify deployment
@@ -159,15 +112,15 @@ curl http://localhost:3000  # Should return HTML
 
 | Variable | Service | Default | Description |
 |----------|---------|---------|-------------|
+| `SENTRY_AUTH_TOKEN` | API | (required) | Sentry org token with `event:read` + `project:read` scope |
+| `SENTRY_BASE_URL` | API | `https://sentry.io/api/0/` | Override for self-hosted Sentry |
 | `ALLOWED_ORIGINS` | API | `http://localhost:3000` | Comma-separated CORS origins |
-| `RELIABILITY_API_KEY` | API | (empty = disabled) | Shared secret for POST/PUT/DELETE auth |
+| `RELIABILITY_API_KEY` | API | (empty = disabled) | Shared secret for POST/DELETE auth |
 | `RATE_LIMIT_MAX` | API | `30` | Max requests per window |
 | `RATE_LIMIT_WINDOW` | API | `60` | Rate limit window (seconds) |
+| `ANALYSIS_TIMEOUT_SECONDS` | API | `120` | Max seconds per analysis request |
 | `NEXT_PUBLIC_API_URL` | UI | `http://localhost:8000` | API base URL |
 | `NEXT_PUBLIC_API_KEY` | UI | (empty) | API key sent from the UI (must match `RELIABILITY_API_KEY`) |
-| `SENTRY_AUTH_TOKEN` | API | (empty) | Sentry org token with `event:read` scope — enables Sentry integration |
-| `SENTRY_BASE_URL` | API | `https://sentry.io/api/0/` | Override for self-hosted Sentry |
-| `ANALYSIS_TIMEOUT_SECONDS` | API | `120` | Max seconds for a single analysis request |
 | `DOCKERHUB_USERNAME` | Build | (required) | Docker Hub username for push |
 | `IMAGE_TAG` | Build | git hash | Docker image tag |
 
@@ -175,9 +128,9 @@ curl http://localhost:3000  # Should return HTML
 
 | Issue Type | First Response | Escalate To |
 |------------|---------------|-------------|
-| API 500 errors | Check CSV format, logs | Development team |
+| Sentry ingest errors | Check token/scopes, API logs | Development team |
 | Container won't start | Check Docker logs, port conflicts | Infrastructure team |
-| Model produces NaN/Inf | Check data quality, try different optimizer | Data science team |
+| Model produces NaN/Inf | Check data volume, optimizer | Data science team |
 | Security incident | Take API offline, rotate credentials | Security team |
 | UI rendering issues | Check browser console, API connectivity | Frontend team |
 
@@ -189,7 +142,8 @@ curl http://localhost:3000  # Should return HTML
 
 ## 8. Capacity Planning
 
-- The API is CPU-bound (one worker per request, scipy MLE fits).
-- Estimated: 2-5 seconds per analysis on a 1000-row CSV.
+- The API is CPU-bound (scipy MLE fits + matplotlib rendering).
+- Estimated: 2-5 seconds per analysis on ~1000 events.
+- Sentry pulls are the bottleneck for large orgs — respect Sentry's rate limits.
 - Recommend 1 vCPU per 5 concurrent analysis requests.
-- Memory: ~256MB baseline, peaks at ~512MB during matplotlib rendering.
+- Memory: ~256MB baseline, peaks at ~512MB during rendering.

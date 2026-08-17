@@ -1,123 +1,100 @@
-# Software Reliability Growth Modeler (Web Ready)
+# Software Reliability Growth Modeler
 
-A premium, **internal-use** containerized web application for modeling and predicting software reliability using the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models. Built for **Python 3.14+**.
+A **Sentry-powered** web application that turns your existing error-monitoring data into actionable reliability intelligence. It fits the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models to your Sentry failure events to predict MTBF, residual faults, and release readiness.
 
 > **⚠️ Design Decision — Internal Network Only**
-> This application is designed for **internal/VPN deployment only**. It intentionally omits user authentication, TLS termination, and internet-facing security hardening. Deploy it behind your organization's network boundary, VPN, or reverse proxy. Do not expose it directly to the public internet.
+> This application is designed for **internal/VPN deployment only**. It intentionally omits internet-facing hardening. Deploy it behind your organization's network boundary or VPN.
 
-This tool transforms raw failure logs into actionable intelligence, helping management estimate:
-*   **MTBF Evolution**: Current and projected system reliability.
-*   **Predicted Residuals**: How many latent faults likely remain in the system.
-*   **Stability Trends**: When the software will reach a desired reliability threshold for release.
+> **Data Source — Sentry only**
+> This tool ingests failure data **exclusively from Sentry**. There is no CSV upload, no file import, and no CLI — the source of truth is your Sentry error events.
+
+## What it tells you
+
+- **MTBF evolution** — current and projected system reliability
+- **Predicted residuals** — how many latent faults likely remain
+- **Release readiness** — when the software reaches a stability threshold
+- **Keystone failures** — which fault categories (via graph centrality) drive the most downstream impact
+- **Failure cascades** — which errors predictably trigger others
+- **Cross-project breakdown** — which Sentry project contributes the most failures
+
+## How it works
+
+1. **Configure Sentry access** — set `SENTRY_AUTH_TOKEN` on the API server.
+2. **Connect** — open the **Sentry** tab, enter your org (and optionally a project, or "all projects").
+3. **Analyze** — the engine pulls events from Sentry, categorizes them via your fault taxonomy, fits the GO/MO models, and renders an interactive dashboard.
+
+## Architecture
+
+```
+┌──────────────┐     HTTP :8000     ┌──────────────┐     ┌─────────────┐
+│   Next.js UI │ ─────────────────▶ │  FastAPI API │ ──▶ │    Sentry    │
+│   Port 3000  │                    │   Port 8000  │     │   API (pull) │
+└──────────────┘                    └──────────────┘     └─────────────┘
+```
+
+| Layer | Location | Purpose |
+|-------|----------|---------|
+| UI | `web/ui` | Next.js 16 frontend (Tailwind, Recharts, Lucide) |
+| API | `web/api` | FastAPI server — Sentry ingestion, analysis, GraphQL |
+| Engine | `modeler/` | GO/MO NHPP models, graph analytics, Sentry connector |
+
+## Deployment
+
+```bash
+docker-compose up
+```
+
+- **Web UI**: http://localhost:3000
+- **API**: http://localhost:8000
+- **API docs (Swagger)**: http://localhost:8000/docs
+- **Health check**: http://localhost:8000/health
+
+## Configuration
+
+Set these environment variables on the API container:
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `SENTRY_AUTH_TOKEN` | ✅ | Org token with `event:read` + `project:read` scope |
+| `SENTRY_BASE_URL` | ❌ | Override for self-hosted Sentry (default `https://sentry.io/api/0/`) |
+| `RELIABILITY_API_KEY` | ❌ | Shared secret for POST/DELETE auth (leave empty to disable) |
+
+See [`SUPPORT.md`](SUPPORT.md) for the full runbook, and [`USER_MANUAL.md`](USER_MANUAL.md) for the end-user guide.
+
+## API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| POST | `/ingest/sentry` | Pull events from Sentry and run analysis (`project: "all"` aggregates every project) |
+| GET | `/ingest/sentry/projects` | List projects in an org |
+| GET | `/config` | Get fault taxonomy and settings |
+| POST | `/config` | Update fault taxonomy and settings |
+| GET | `/logs` | Paginated analysis archive |
+| GET | `/trends` | Cross-run MTBF/failure-rate comparison |
+| GET | `/report/{id}/html` | Self-contained HTML executive report |
+| POST | `/graphql` | Failure graph queries |
+
+## Development
+
+```bash
+# Install Python dependencies
+pip install -r requirements.txt -r web/api/requirements.txt
+
+# Run tests
+python -m pytest tests/unit/ -v
+python -m pytest tests/integration/ -v
+
+# Run the API locally
+cd web/api && uvicorn main:app --reload
+```
 
 ## Maintainers
 
 - **Primary**: Reliability Engineering Team
-- **Docker Hub**: `trustaldo/reliability-modeler-api`, `trustaldo/reliability-modeler-ui`
 - **Repository**: https://github.com/Yoda-Man/reliability-modeler
-- **Contact**: For support, file an issue on the GitHub repository.
+- **Contact**: File an issue on the GitHub repository.
 
-## 🚀 Key Features
+## License
 
-*   **Executive Dashboard**: High-fidelity visualizations of reliability growth and failure intensity.
-*   **Dynamic Configuration**: Live-edit the fault taxonomy and engine parameters directly from the UI.
-*   **Dual Modeling Engine**: Fits both GO and MO models with automatic AIC (Akaike Information Criterion) recommendation.
-*   **Analysis Archive**: Automatically persists every analysis run for historical comparison and audit trails.
-*   **Smart Categorization**: Uses a customizable rules engine to tag failures (e.g., "Database", "Security", "UI") automatically.
-*   **Containerized Stack**: Fully orchestrated with Docker for one-command deployment.
-
-## 📦 Rapid Deployment
-
-The easiest way to run the Reliability Modeler is using Docker.
-
-1.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/Yoda-Man/reliability-modeler.git
-    cd reliability-modeler
-    ```
-
-2.  **Launch with Docker Compose**:
-    ```bash
-    docker-compose up
-    ```
-
-3.  **Access the Application**:
-    *   **Web UI**: [http://localhost:3000](http://localhost:3000)
-    *   **Backend API**: [http://localhost:8000](http://localhost:8000)
-    *   **API Docs (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
-    *   **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
-
-## 📖 Quick Start
-
-1.  **Prepare Data**: Have a CSV file ready with failure timestamps and descriptions.
-2.  **Upload**: Use the **Dashboard** drag-and-drop zone to ingest your file.
-3.  **Analyze**: View instant KPIs, growth curves, and intensity plots.
-4.  **Configure**: Head to the **Configurations** tab to refine how the engine classifies faults or to adjust mathematical solver settings.
-5.  **Review History**: Visit the **Logs Archive** to revisit past reports.
-
-## 🛠️ Advanced Engine Settings
-
-The Modeler now supports granular control over the statistical fitting process:
-*   **Optimization Algorithm**: Toggle between `L-BFGS-B`, `TNC`, `SLSQP`, and `Nelder-Mead`.
-*   **Fitting Tolerance**: Adjust the convergence threshold for high-stakes precision.
-*   **Multi-Label Tagging**: Enable overlapping categorization for complex failure descriptions.
-
-## 📁 Project Structure
-
-*   **/web/ui**: Next.js 16.1 frontend (Tailwind CSS, Recharts, Lucide) on Node 22 LTS.
-*   **/web/api**: FastAPI backend wrapper.
-*   **/modeler**: The core mathematical engine (GO/MO implementations).
-*   **/output**: Persistent storage for analysis logs and generated plots.
-*   `docker-compose.yml`: Orchestration for the full stack.
-
-## 💻 CLI Usage (Legacy/Advanced)
-
-The core engine remains accessible via CLI for automated pipelines:
-```bash
-python reliability_modeler.py --csv input/error_log.csv --model both
-```
-
-## 🧪 Testing
-
-```bash
-# Run the full test suite
-python -m pytest tests/ -v
-
-# Run only unit tests
-python -m pytest tests/unit/ -v
-
-# Run API integration tests
-python -m pytest tests/integration/ -v
-```
-
-## 📋 API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check — returns `{"status": "ok"}` |
-| GET | `/docs` | Auto-generated OpenAPI/Swagger documentation |
-| POST | `/analyze` | Upload CSV for reliability analysis |
-| GET | `/sample-data` | Run analysis on built-in sample data |
-| GET | `/config` | Get current fault taxonomy and settings |
-| POST | `/config` | Update fault taxonomy and engine settings |
-| GET | `/logs` | List archived analysis sessions |
-| GET | `/trends` | Cross-run MTBF and failure-rate comparison |
-| POST | `/ingest/sentry` | Pull failure events from Sentry and analyze |
-| POST | `/graphql` | GraphQL endpoint for failure graph queries |
-
-## 🐛 Sentry Integration
-
-Pull raw failure events directly from Sentry — no CSV export needed:
-
-1. Create a Sentry auth token with `event:read` and `project:read` scope.
-2. Set `SENTRY_AUTH_TOKEN` on the API server (and `SENTRY_BASE_URL` for self-hosted Sentry).
-3. Open the **Sentry** tab in the UI, enter your org and project slug, choose a look-back window, and click **Pull & Analyze**.
-
-Events are counted as individual occurrences (not unique issues) for accurate MTBF modeling, and categorized using your existing `fault_categories.conf` taxonomy.
-
-## 🔒 Security
-
-See [SUPPORT.md](SUPPORT.md) for operational runbooks and security considerations.
-
----
-*Developed for excellence in software quality engineering.*
+MIT — see [`LICENSE`](LICENSE).

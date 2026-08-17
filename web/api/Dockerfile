@@ -18,7 +18,6 @@ COPY ./fault_categories.conf /app/fault_categories.conf
 
 # Copy the API code
 COPY ./web/api/main.py /app/main.py
-COPY ./web/api/sample_data.csv /app/sample_data.csv
 
 EXPOSE 8000
 

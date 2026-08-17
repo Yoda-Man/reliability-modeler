@@ -5,6 +5,30 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2025-08-08
+
+### Major — Sentry-Only Simplification
+- **Removed CSV upload** — deleted `/analyze` (file upload) and `/sample-data` endpoints.
+- **Removed the CLI** — deleted `reliability_modeler.py` and its `export.py` module.
+- **Removed CSV parsing** — `modeler/data.py` now keeps only `categorize_description()`
+  and `load_fault_categories()` (used by the Sentry connector). `load_failure_data()` removed.
+- **Sentry is the sole ingestion source** — `/ingest/sentry` and `/ingest/sentry/projects`.
+- **UI**: removed `FileUpload` component; the **Sentry** tab is now the default entry point.
+- **Dependencies**: removed `python-multipart` and `python-dateutil` (no longer needed).
+
+### Fixed
+- **GraphQL introspection crash** — `graphene.Schema(introspection=False)` was never a valid
+  argument and would crash the API on startup. Replaced with query-level introspection
+  rejection in the `/graphql` endpoint.
+
+### Documentation
+- Rewrote `README.md`, `SUPPORT.md`, and `USER_MANUAL.md` for the Sentry-only workflow.
+- Removed stale `documentation/` HTML files referencing the CSV/CLI flow.
+
+### Removed files
+- `reliability_modeler.py`, `modeler/export.py`, `run_analysis.bat`, `build_release.bat`,
+  `web/api/sample_data.csv`, `input/error_log.csv`, ad-hoc test scripts, and stale logs.
+
 ## [2.6.0] - 2025-08-08
 
 ### Added — Multi-Project Sentry
