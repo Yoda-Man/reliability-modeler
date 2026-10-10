@@ -41,3 +41,17 @@ coverage/
 .vscode/
 .idea/
 .DS_Store
+
+# Handover audit report (lives in Claude Docs; keep exported copies out of git)
+*Handover*Audit*
+*handover*audit*
+*HANDOVER*AUDIT*
+
+# graphify knowledge-graph output (generated locally)
+graphify-out/
+
+# AI tool configs (local only)
+.cursor/
+.windsurf/
+.roo/
+.kiro/
