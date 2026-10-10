@@ -1,267 +1,607 @@
-import os
-import sys
-import uuid
-import logging
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import List, Optional
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from pathlib import Path
-from datetime import datetime
-import base64
-import json
-import time
-import html as _html
-import secrets
-import re
-import shutil
+"""
+Reliability Modeler API.
+
+Configuration is entirely environment-driven (see README / CONTRACT):
+RELIABILITY_API_KEY (required unless ALLOW_INSECURE_NO_AUTH=true), CONFIG_DIR,
+DEFAULT_CONFIG_PATH, OUTPUT_DIR, RETENTION_DAYS, ANALYSIS_TIMEOUT_SECONDS,
+MAX_BODY_BYTES, RATE_LIMIT_PER_MINUTE, ALLOWED_ORIGINS, SENTRY_AUTH_TOKEN,
+SENTRY_BASE_URL, LOG_LEVEL.
+"""
 
 import asyncio
+import base64
+import html as _html
+import json
+import logging
+import os
+import re
+import secrets
+import shutil
+import sys
+import threading
+import time
+import uuid
+from collections import deque
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Tuple
 
-# Add the app directory to sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append("/app")
+# Make `modeler` importable when running from a checkout (`cd web/api &&
+# uvicorn main:app`) as well as from the flat Docker layout (/app/modeler).
+_API_DIR = Path(__file__).resolve().parent
+for _candidate in (_API_DIR, _API_DIR.parent.parent):
+    if (_candidate / "modeler" / "__init__.py").is_file():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
 
-from modeler.data import categorize_description, load_fault_categories
+import numpy as np
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from modeler import __version__
+from modeler import config as rm_config
+from modeler.data import TaxonomyError, load_fault_categories, parse_fault_categories
+from modeler.graphs import generate_graph_insights
+from modeler.logutil import configure_logging, request_id_var
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
-from modeler.graphs import build_failure_graphs, generate_graph_insights
-from modeler.sentry import load_sentry_failures, load_sentry_failures_all, list_sentry_projects, SentryError
-try:
-    from .graphql_schema import schema, store_analysis_data
-except ImportError:
-    from graphql_schema import schema, store_analysis_data
-
-# Define base directory for relative path resolution
-BASE_DIR = Path(__file__).resolve().parent
-# Docker uses a flat layout (main.py, modeler/, fault_categories.conf all in /app);
-# local dev uses web/api/ with the project root two levels up.
-ROOT_DIR = BASE_DIR if (BASE_DIR / "fault_categories.conf").exists() else BASE_DIR.parent.parent
-
-# ── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format='{"time": "%(asctime)s", "level": "%(levelname)s", "logger": "%(name)s", "message": "%(message)s"}',
-    datefmt='%Y-%m-%dT%H:%M:%S',
+from modeler.sentry import (
+    SentryCancelled,
+    SentryError,
+    list_sentry_projects,
+    load_sentry_failures,
+    load_sentry_failures_all,
 )
+
+try:
+    from . import graphql_schema as gql
+except ImportError:
+    import graphql_schema as gql
+
+configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("api")
 
-app = FastAPI(title="Reliability Modeler API", version="2.8.0")
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}")
+    if value < minimum:
+        raise RuntimeError(f"{name} must be >= {minimum}, got {value}")
+    return value
 
 
-# ── Startup config persistence check ─────────────────────────────────────────
-def _warn_ephemeral_storage():
-    """Log a warning if config files are on potentially ephemeral storage."""
-    config_path = ROOT_DIR / "fault_categories.conf"
-    settings_path = BASE_DIR / "settings.json"
-    for path, name in [(config_path, "fault_categories.conf"), (settings_path, "settings.json")]:
-        parent = path.parent
-        if not any(parent.iterdir()):
-            continue  # parent doesn't exist yet, will be created
-        # Check if parent is a known ephemeral location
-        ephemeral_markers = ["/tmp", "/var/tmp", "temp_"]
-        if any(m in str(parent) for m in ephemeral_markers):
-            logger.warning(f"⚠️  {name} is on ephemeral storage ({parent}). "
-                           f"Config changes will be LOST on container restart. "
-                           f"Mount a persistent volume at {parent}.")
+def _env_bool(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-_warn_ephemeral_storage()
+# ── Security configuration (fail closed) ─────────────────────────────────────
+def load_api_key() -> str:
+    """Return the configured API key, or "" when auth is explicitly disabled.
+
+    Raises RuntimeError (refusing to start) when no key is set and the
+    ALLOW_INSECURE_NO_AUTH escape hatch is not enabled.
+    """
+    key = os.getenv("RELIABILITY_API_KEY", "").strip()
+    if key:
+        return key
+    if _env_bool("ALLOW_INSECURE_NO_AUTH"):
+        logger.warning("SECURITY WARNING: RELIABILITY_API_KEY is not set and ALLOW_INSECURE_NO_AUTH=true. "
+                       "API key authentication is DISABLED; every endpoint is reachable by anyone "
+                       "who can reach this server. Never run this way in production.")
+        return ""
+    raise RuntimeError("RELIABILITY_API_KEY is not set. Refusing to start without authentication. "
+                       "Set RELIABILITY_API_KEY (e.g. `openssl rand -hex 32`), or set "
+                       "ALLOW_INSECURE_NO_AUTH=true for local development only.")
 
 
-# ── Startup: prune logs older than 90 days ───────────────────────────────────
-def _prune_directory(dir_path: Path, cutoff: float) -> int:
-    """Delete files older than `cutoff` in a directory. Returns count pruned."""
+API_KEY = load_api_key()
+AUTH_EXEMPT_PATHS = {"/health", "/health/live"}
+RATE_LIMIT_EXEMPT_PATHS = {"/health/live"}
+
+ANALYSIS_TIMEOUT_SECONDS = _env_int("ANALYSIS_TIMEOUT_SECONDS", 120, minimum=1)
+MAX_BODY_BYTES = _env_int("MAX_BODY_BYTES", 1024 * 1024, minimum=1)
+# RATE_LIMIT_MAX is the pre-2.9 name, still honoured as a fallback.
+RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", _env_int("RATE_LIMIT_MAX", 30, 1), minimum=1)
+RATE_LIMIT_WINDOW_SECONDS = 60
+RETENTION_DAYS = _env_int("RETENTION_DAYS", 90, minimum=0)
+TEMP_PLOT_MAX_AGE_SECONDS = 3600
+MAX_TAXONOMY_CHARS = 256 * 1024
+MAX_GRAPHQL_BYTES = 256 * 1024
+
+VALID_OPTIMIZATION_METHODS = ("L-BFGS-B", "TNC", "SLSQP", "Nelder-Mead")
+MIN_FUTURE_HOURS = 1
+MAX_FUTURE_HOURS = 100000
+ANALYSIS_ID_RE = gql.ANALYSIS_ID_RE
+_REQUEST_ID_RE = re.compile(r"[^A-Za-z0-9-]")
+
+
+# ── Metrics (hand-rolled Prometheus text format) ─────────────────────────────
+class Metrics:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.http_requests: Dict[Tuple[str, int], int] = {}
+        self.analyses: Dict[str, int] = {}
+        self.analysis_duration_sum = 0.0
+        self.analysis_duration_count = 0
+        self.ingest_failures = 0
+
+    def observe_request(self, method: str, status: int) -> None:
+        with self._lock:
+            key = (method, int(status))
+            self.http_requests[key] = self.http_requests.get(key, 0) + 1
+
+    def observe_analysis(self, result: str, duration: Optional[float] = None) -> None:
+        with self._lock:
+            self.analyses[result] = self.analyses.get(result, 0) + 1
+            if duration is not None:
+                self.analysis_duration_sum += duration
+                self.analysis_duration_count += 1
+
+    def ingest_failed(self) -> None:
+        with self._lock:
+            self.ingest_failures += 1
+
+    def render(self) -> str:
+        with self._lock:
+            lines = [
+                "# HELP rm_http_requests_total HTTP requests by method and status.",
+                "# TYPE rm_http_requests_total counter",
+            ]
+            for (method, status), n in sorted(self.http_requests.items()):
+                lines.append(f'rm_http_requests_total{{method="{method}",status="{status}"}} {n}')
+            lines += [
+                "# HELP rm_analyses_total Reliability analyses by result.",
+                "# TYPE rm_analyses_total counter",
+            ]
+            for result, n in sorted(self.analyses.items()):
+                lines.append(f'rm_analyses_total{{result="{result}"}} {n}')
+            lines += [
+                "# HELP rm_analysis_duration_seconds Time spent running analyses.",
+                "# TYPE rm_analysis_duration_seconds summary",
+                f"rm_analysis_duration_seconds_sum {self.analysis_duration_sum:.6f}",
+                f"rm_analysis_duration_seconds_count {self.analysis_duration_count}",
+                "# HELP rm_ingest_failures_total Failed Sentry ingests (fetch errors and timeouts).",
+                "# TYPE rm_ingest_failures_total counter",
+                f"rm_ingest_failures_total {self.ingest_failures}",
+            ]
+        return "\n".join(lines) + "\n"
+
+
+metrics = Metrics()
+
+
+# ── Retention ────────────────────────────────────────────────────────────────
+def _prune_directory(dir_path: Path, cutoff: float) -> List[str]:
+    """Delete files older than `cutoff` (epoch seconds) in a directory. Returns names pruned."""
     if not dir_path.exists():
-        return 0
-    pruned = 0
+        return []
+    pruned = []
     for f in dir_path.iterdir():
         try:
             if f.is_file() and f.stat().st_mtime < cutoff:
                 f.unlink()
-                pruned += 1
-        except Exception:
-            pass
+                pruned.append(f.name)
+        except OSError:
+            logger.warning("Failed to prune %s", f, exc_info=True)
     return pruned
 
 
-def _prune_logs_on_startup():
-    cutoff = datetime.now().timestamp() - (90 * 86400)
-    log_dir = ROOT_DIR / "output" / "logs"
-    analyses_dir = ROOT_DIR / "output" / "analyses"
-    plots_dir = ROOT_DIR / "output" / "plots"
-    pruned = _prune_directory(log_dir, cutoff)
-    pruned += _prune_directory(analyses_dir, cutoff)
-    pruned += _prune_directory(plots_dir, cutoff)
-    if pruned > 0:
-        logger.info(f"Startup: pruned {pruned} files older than 90 days")
+def prune_output(retention_days: int) -> Dict[str, List[str]]:
+    """Prune archived logs/analyses/plots older than `retention_days` and stale temp plots."""
+    now = time.time()
+    cutoff = now - retention_days * 86400
+    result = {
+        "logs": _prune_directory(rm_config.logs_dir(), cutoff),
+        "analyses": _prune_directory(rm_config.analyses_dir(), cutoff),
+        "plots": _prune_directory(rm_config.plots_dir(), cutoff),
+        "temp_plots": _prune_directory(rm_config.temp_plots_dir(), now - TEMP_PLOT_MAX_AGE_SECONDS),
+    }
+    gql.forget_analyses(Path(name).stem for name in result["analyses"])
+    total = sum(len(v) for v in result.values())
+    if total:
+        logger.info("Retention prune (%d days) removed %d file(s): %s", retention_days, total,
+                    json.dumps({k: v[:20] + (["..."] if len(v) > 20 else []) for k, v in result.items() if v}))
+    else:
+        logger.info("Retention prune (%d days): nothing to remove", retention_days)
+    return result
 
 
-_prune_logs_on_startup()
+async def _retention_loop():
+    """Prune on startup and then once a day."""
+    while True:
+        try:
+            await asyncio.to_thread(prune_output, RETENTION_DAYS)
+        except Exception:
+            logger.exception("Scheduled retention prune failed")
+        await asyncio.sleep(86400)
 
 
-# ── CORS ────────────────────────────────────────────────────────────────────
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
+def _startup_checks() -> None:
+    cfg_dir = rm_config.config_dir()
+    out_dir = rm_config.output_dir()
+    logger.info("Reliability Modeler API %s starting: CONFIG_DIR=%s OUTPUT_DIR=%s DEFAULT_CONFIG_PATH=%s",
+                __version__, cfg_dir, out_dir, rm_config.default_config_path())
+    try:
+        rm_config.seed_taxonomy()
+    except OSError:
+        logger.exception("Failed to seed taxonomy into %s", cfg_dir)
+    if not rm_config.is_writable_dir(cfg_dir):
+        logger.warning("CONFIG_DIR %s is not writable: configuration changes cannot be saved. "
+                       "Mount a writable persistent volume there.", cfg_dir)
+    if not rm_config.is_writable_dir(out_dir):
+        logger.error("OUTPUT_DIR %s is not writable: analyses cannot be archived.", out_dir)
+    try:
+        load_fault_categories(rm_config.taxonomy_path())
+    except TaxonomyError as e:
+        logger.error("Taxonomy not loaded: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _startup_checks()
+    task = None
+    if RETENTION_DAYS > 0:
+        task = asyncio.create_task(_retention_loop())
+    else:
+        logger.info("RETENTION_DAYS=0: automatic retention pruning disabled")
+    try:
+        yield
+    finally:
+        if task:
+            task.cancel()
+
+
+app = FastAPI(
+    title="Reliability Modeler API",
+    version=__version__,
+    lifespan=lifespan,
+)
+
+
+# ── Error handling: uniform {"detail": "<message>"} bodies ───────────────────
+def _validation_message(errors) -> str:
+    parts = []
+    for err in errors:
+        loc = ".".join(str(p) for p in err.get("loc", ()) if p not in ("body", "query", "path"))
+        msg = err.get("msg", "Invalid value")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) or "Invalid request"
+
+
+@app.exception_handler(RequestValidationError)
+async def _request_validation_handler(_request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": _validation_message(exc.errors())})
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(_request: Request, exc: StarletteHTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else json.dumps(jsonable_encoder(exc.detail))
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail},
+                        headers=getattr(exc, "headers", None))
+
+
+class BodyTooLarge(HTTPException):
+    """Raised from the wrapped ASGI receive channel when a body exceeds MAX_BODY_BYTES.
+
+    Subclasses HTTPException so FastAPI's body parsing re-raises it unchanged
+    (instead of converting it into a generic 400).
+    """
+
+    def __init__(self):
+        super().__init__(status_code=413, detail=f"Request body too large (max {MAX_BODY_BYTES} bytes)")
+
+
+async def _send_json(send, status: int, detail: str, headers: Optional[Dict[str, str]] = None):
+    body = json.dumps({"detail": detail}).encode("utf-8")
+    raw_headers = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+    for k, v in (headers or {}).items():
+        raw_headers.append((k.lower().encode(), str(v).encode()))
+    await send({"type": "http.response.start", "status": status, "headers": raw_headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+# ── Gateway middleware: request id, logging, metrics, auth, rate limit, body limit
+_rate_limit_store: Dict[str, deque] = {}
+_rate_limit_lock = threading.Lock()
+
+
+def _rate_limited(client_key: str) -> bool:
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    with _rate_limit_lock:
+        bucket = _rate_limit_store.setdefault(client_key, deque())
+        while bucket and bucket[0] <= window_start:
+            bucket.popleft()
+        if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+            return True
+        bucket.append(now)
+        if len(_rate_limit_store) > 1000:
+            for key in [k for k, b in _rate_limit_store.items() if not b or b[-1] <= window_start]:
+                del _rate_limit_store[key]
+    return False
+
+
+def _is_authenticated(headers: Headers) -> bool:
+    if not API_KEY:
+        return True
+    provided = headers.get("x-api-key", "")
+    return secrets.compare_digest(provided.encode("utf-8"), API_KEY.encode("utf-8"))
+
+
+class GatewayMiddleware:
+    """Outermost pure-ASGI middleware.
+
+    Order of checks: request id -> auth -> rate limit -> body size; then the
+    app runs with a size-limited receive channel. Any unhandled exception is
+    logged with the request id and turned into a sanitized 500.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        req_id = _REQUEST_ID_RE.sub("", headers.get("x-request-id", ""))[:64] or uuid.uuid4().hex[:16]
+        token = request_id_var.set(req_id)
+        scope.setdefault("state", {})["req_id"] = req_id
+        method, path = scope["method"], scope["path"]
+        peer = scope["client"][0] if scope.get("client") else "unknown"
+        state = {"status": 500, "started": False}
+        started_at = time.perf_counter()
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                state["started"] = True
+                state["status"] = message["status"]
+                MutableHeaders(scope=message)["X-Request-ID"] = req_id
+            await send(message)
+
+        try:
+            authed = _is_authenticated(headers)
+            is_preflight = method == "OPTIONS" and "access-control-request-method" in headers
+            if not authed and path not in AUTH_EXEMPT_PATHS and not is_preflight:
+                logger.warning("Auth failed for %s on %s %s", peer, method, path)
+                await _send_json(send_wrapper, 401, "Invalid or missing API key")
+                return
+
+            # X-Forwarded-For is only trusted on requests that carry the API key
+            # (i.e. from the UI proxy); otherwise a client could spoof it to
+            # dodge the limiter.
+            client_key = peer
+            xff = headers.get("x-forwarded-for", "")
+            if xff and authed and API_KEY:
+                client_key = xff.split(",")[0].strip() or peer
+            if path not in RATE_LIMIT_EXEMPT_PATHS and _rate_limited(client_key):
+                logger.warning("Rate limit exceeded for %s on %s %s", client_key, method, path)
+                await _send_json(send_wrapper, 429, "Too many requests",
+                                 {"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)})
+                return
+
+            content_length = headers.get("content-length")
+            if content_length is not None:
+                try:
+                    too_big = int(content_length) > MAX_BODY_BYTES
+                except ValueError:
+                    await _send_json(send_wrapper, 400, "Invalid Content-Length header")
+                    return
+                if too_big:
+                    await _send_json(send_wrapper, 413, f"Request body too large (max {MAX_BODY_BYTES} bytes)")
+                    return
+
+            received = 0
+
+            async def limited_receive():
+                nonlocal received
+                message = await receive()
+                if message["type"] == "http.request":
+                    received += len(message.get("body", b""))
+                    if received > MAX_BODY_BYTES:
+                        raise BodyTooLarge()
+                return message
+
+            await self.app(scope, limited_receive, send_wrapper)
+        except BodyTooLarge as e:
+            if not state["started"]:
+                await _send_json(send_wrapper, 413, e.detail)
+        except Exception:
+            logger.exception("Unhandled error on %s %s", method, path)
+            if not state["started"]:
+                await _send_json(send_wrapper, 500, f"Internal server error (request id {req_id})")
+        finally:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            metrics.observe_request(method, state["status"])
+            logger.info("%s %s -> %d %.0fms", method, path, state["status"], elapsed_ms)
+            request_id_var.reset(token)
+
+
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Content-Type", "X-API-Key", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
-
-# ── API Key from env ─────────────────────────────────────────────────────────
-API_KEY = os.getenv("RELIABILITY_API_KEY", "")
-AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
-_ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
-
-if not API_KEY:
-    logger.warning("⚠️  RELIABILITY_API_KEY is not set — API key authentication is DISABLED. "
-                   "Every endpoint is reachable by anyone on the network. "
-                   "Set RELIABILITY_API_KEY to protect POST/DELETE routes.")
-
-@app.middleware("http")
-async def api_key_middleware(request: Request, call_next):
-    if not API_KEY:
-        return await call_next(request)  # auth disabled if no key configured
-    if request.url.path in AUTH_EXEMPT_PATHS or request.url.path.startswith("/health"):
-        return await call_next(request)
-    provided = request.headers.get("X-API-Key", "")
-    if not secrets.compare_digest(provided, API_KEY):
-        logger.warning(f"Auth failed for {request.client.host if request.client else 'unknown'} on {request.method} {request.url.path}")
-        return JSONResponse(status_code=401, content={"error": "Invalid or missing API key"})
-    return await call_next(request)
+# Added last => outermost.
+app.add_middleware(GatewayMiddleware)
 
 
-# ── Rate Limiting (simple in-memory) ─────────────────────────────────────────
-_rate_limit_store: dict[str, list] = {}
-RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "30"))  # requests per window
-RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    # Trust a single terminating proxy's X-Forwarded-For (first hop)
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        client_ip = xff.split(",")[0].strip()
-    else:
-        client_ip = request.client.host if request.client else "unknown"
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW
-    timestamps = [t for t in _rate_limit_store.get(client_ip, []) if t > window_start]
-    if len(timestamps) >= RATE_LIMIT_MAX:
-        logger.warning(f"Rate limit exceeded for {client_ip}")
-        return JSONResponse(status_code=429, content={"error": "Too many requests", "retry_after": RATE_LIMIT_WINDOW})
-    timestamps.append(now)
-    _rate_limit_store[client_ip] = timestamps
-    # Prune expired entries periodically (keep only clients with recent activity)
-    if len(_rate_limit_store) > 500:
-        cutoff = now - (RATE_LIMIT_WINDOW * 2)
-        stale = [ip for ip, ts_list in _rate_limit_store.items()
-                  if not any(t > cutoff for t in ts_list)]
-        for ip in stale:
-            del _rate_limit_store[ip]
-    response = await call_next(request)
-    return response
-
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    raw_id = request.headers.get("X-Request-ID", "")
-    # Sanitize to a short safe token (prevent log-forging via newlines/control chars)
-    req_id = "".join(c for c in raw_id if c.isalnum() or c == '-')[:32]
-    if not req_id:
-        req_id = str(uuid.uuid4())[:8]
-    request.state.req_id = req_id
-    logger.info(f"[{req_id}] {request.method} {request.url.path}")
-    start = time.time()
-    response = await call_next(request)
-    elapsed_ms = (time.time() - start) * 1000
-    logger.info(f"[{req_id}] {response.status_code} {elapsed_ms:.0f}ms")
-    response.headers["X-Request-ID"] = req_id
-    return response
-
-VALID_OPTIMIZATION_METHODS = {"L-BFGS-B", "TNC", "SLSQP", "Nelder-Mead"}
-MIN_FUTURE_HOURS = 1
-MAX_FUTURE_HOURS = 100000
-
+# ── Models ───────────────────────────────────────────────────────────────────
 class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     multi_label: bool = False
-    optimization_method: str = "L-BFGS-B"
-    tolerance: float = 1e-6
+    optimization_method: Literal["L-BFGS-B", "TNC", "SLSQP", "Nelder-Mead"] = "L-BFGS-B"
+    tolerance: float = Field(1e-6, gt=0, le=1)
 
+
+class ConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: Optional[str] = Field(None, max_length=MAX_TAXONOMY_CHARS)
+    settings: Optional[Settings] = None
+
+    @field_validator("content")
+    @classmethod
+    def _check_taxonomy(cls, v):
+        if v is None:
+            return v
+        for lineno, line in enumerate(v.splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            if '[' not in stripped or not stripped.endswith(']'):
+                raise ValueError(f"Invalid taxonomy format on line {lineno}. "
+                                 "Each line must be: Category [keyword1, keyword2]")
+        if not parse_fault_categories(v):
+            raise ValueError("Taxonomy must define at least one category")
+        return v
+
+
+_SLUG_PATTERN = r"^[a-zA-Z0-9._-]+$"
+
+
+class SentryIngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    org: str = Field(..., min_length=1, max_length=100, pattern=_SLUG_PATTERN)
+    project: str = Field(..., min_length=1, max_length=100, pattern=_SLUG_PATTERN,
+                         description="Project slug, or 'all' to aggregate every project")
+    days: int = Field(30, ge=1, le=90)
+    future_hours: float = Field(1000.0, ge=MIN_FUTURE_HOURS, le=MAX_FUTURE_HOURS, allow_inf_nan=False)
+
+
+# ── Settings & archive persistence ───────────────────────────────────────────
 def load_persistent_settings() -> Settings:
-    settings_path = BASE_DIR / "settings.json"
-    if settings_path.exists():
-        try:
-            with open(settings_path, "r") as f:
-                return Settings(**json.load(f))
-        except Exception as e:
-            logger.error(f"Failed to load settings.json ({e}) — using defaults")
-    return Settings()
+    path = rm_config.settings_path()
+    if not path.exists():
+        return Settings()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("settings.json must contain a JSON object")
+        known = {k: v for k, v in raw.items() if k in Settings.model_fields}
+        return Settings(**known)
+    except (OSError, ValueError, ValidationError):
+        logger.error("Failed to load %s; using default settings", path, exc_info=True)
+        return Settings()
 
-def save_to_archive(log_id, filename, summary):
-    log_dir = ROOT_DIR / "output" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+
+def save_to_archive(log_id: str, filename: str, summary: dict) -> None:
     entry = {
         "id": log_id,
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
         "file": filename,
         "status": "Completed",
-        "summary": summary
+        "summary": summary,
     }
-    tmp_path = log_dir / f".{log_id}.tmp"
-    final_path = log_dir / f"{log_id}.json"
-    with open(tmp_path, "w") as f:
-        json.dump(entry, f)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp_path.replace(final_path)  # atomic on same filesystem
+    rm_config.atomic_write_json(rm_config.logs_dir() / f"{log_id}.json", entry)
 
+
+def _read_json_files(directory: Path) -> List[Tuple[Path, dict]]:
+    entries = []
+    if not directory.exists():
+        return entries
+    for path in directory.glob("*.json"):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("Skipping unreadable/corrupt archive file %s", path, exc_info=True)
+            continue
+        if not isinstance(data, dict):
+            logger.warning("Skipping archive file %s with unexpected shape", path)
+            continue
+        entries.append((path, data))
+    return entries
+
+
+def _taxonomy_status() -> Tuple[bool, Optional[str]]:
+    try:
+        load_fault_categories(rm_config.taxonomy_path())
+        return True, None
+    except TaxonomyError as e:
+        return False, str(e)
+
+
+# ── Health & metrics ─────────────────────────────────────────────────────────
+@app.get("/health/live")
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health")
+async def health_check():
+    output_writable = await asyncio.to_thread(rm_config.is_writable_dir, rm_config.output_dir())
+    config_readable, _ = await asyncio.to_thread(_taxonomy_status)
+    sentry_configured = bool(os.getenv("SENTRY_AUTH_TOKEN", "").strip())
+    if not (output_writable and config_readable):
+        status, code = "error", 503
+    elif not sentry_configured:
+        status, code = "degraded", 200
+    else:
+        status, code = "ok", 200
+    body = {
+        "status": status,
+        "version": __version__,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": {
+            "output_writable": output_writable,
+            "config_readable": config_readable,
+            "sentry_token_configured": sentry_configured,
+        },
+    }
+    return JSONResponse(status_code=code, content=body)
+
+
+@app.get("/metrics")
+async def get_metrics():
+    return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+# ── Logs / trends / reports ──────────────────────────────────────────────────
 @app.get("/logs")
 async def get_logs(limit: int = 50, offset: int = 0):
     limit = max(1, min(limit, 200))
     offset = max(0, min(offset, 10000))
-    log_dir = ROOT_DIR / "output" / "logs"
-    if not log_dir.exists():
-        return {"total": 0, "logs": []}
-    
-    all_logs = []
-    for log_file in log_dir.glob("*.json"):
-        try:
-            with open(log_file, "r") as f:
-                all_logs.append(json.load(f))
-        except Exception:
-            continue
-    
-    all_logs.sort(key=lambda x: x.get('date', ''), reverse=True)
-    total = len(all_logs)
-    page = all_logs[offset:offset + limit]
-    
-    return {"total": total, "logs": page}
+    all_logs = [entry for _, entry in await asyncio.to_thread(_read_json_files, rm_config.logs_dir())]
+    all_logs.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+    return {"total": len(all_logs), "logs": all_logs[offset:offset + limit]}
 
 
 @app.post("/logs/prune")
-async def prune_logs(retention_days: int = 90):
-    """Delete archived logs, analyses, and plots older than `retention_days`. Default 90."""
+async def prune_logs(retention_days: Optional[int] = None):
+    """Delete archived logs, analyses, and plots older than `retention_days` (default RETENTION_DAYS or 90)."""
+    if retention_days is None:
+        retention_days = RETENTION_DAYS or 90
     if retention_days < 7:
-        raise HTTPException(status_code=400, detail="retention_days must be at least 7")
-
-    cutoff = datetime.now().timestamp() - (retention_days * 86400)
-    log_dir = ROOT_DIR / "output" / "logs"
-    analyses_dir = ROOT_DIR / "output" / "analyses"
-    plots_dir = ROOT_DIR / "output" / "plots"
-
-    pruned = _prune_directory(log_dir, cutoff)
-    pruned += _prune_directory(analyses_dir, cutoff)
-    pruned += _prune_directory(plots_dir, cutoff)
-
-    logger.info(f"Pruned {pruned} files older than {retention_days} days")
-    return {"pruned": pruned, "message": f"Removed {pruned} file(s) older than {retention_days} days"}
+        raise HTTPException(status_code=422, detail="retention_days must be at least 7")
+    result = await asyncio.to_thread(prune_output, retention_days)
+    pruned = sum(len(v) for v in result.values())
+    return {
+        "pruned": pruned,
+        "by_directory": {k: len(v) for k, v in result.items()},
+        "message": f"Removed {pruned} file(s) older than {retention_days} days",
+    }
 
 
 @app.get("/trends")
@@ -270,23 +610,17 @@ async def get_trends():
     Compare MTBF, failure rate, and total failures across all archived analysis runs.
     Returns time-series data suitable for trend-line charts.
     """
-    log_dir = ROOT_DIR / "output" / "logs"
-    if not log_dir.exists():
-        return {"runs": [], "trend": "insufficient_data"}
+    entries = await asyncio.to_thread(_read_json_files, rm_config.logs_dir())
+    entries.sort(key=lambda pe: pe[0].stat().st_mtime if pe[0].exists() else 0)
 
     runs = []
-    for log_file in sorted(log_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-        try:
-            with open(log_file, "r") as f:
-                entry = json.load(f)
-        except Exception:
-            continue
-        summary = entry.get("summary", {})
-        tf = summary.get("total_failures", 0)
-        dh = summary.get("duration_hours", 0)
+    for path, entry in entries:
+        summary = entry.get("summary") or {}
+        tf = summary.get("total_failures", 0) or 0
+        dh = summary.get("duration_hours", 0) or 0
         if tf > 0 and dh > 0:
             runs.append({
-                "id": entry.get("id", log_file.stem),
+                "id": entry.get("id", path.stem),
                 "date": entry.get("date", ""),
                 "file": entry.get("file", ""),
                 "total_failures": tf,
@@ -298,7 +632,6 @@ async def get_trends():
     if len(runs) < 2:
         return {"runs": runs, "trend": "insufficient_data" if len(runs) == 0 else "single_run"}
 
-    # Compute trend direction for MTBF
     first_mtbf = runs[0]["mtbf_hours"]
     last_mtbf = runs[-1]["mtbf_hours"]
     if last_mtbf > first_mtbf * 1.05:
@@ -308,10 +641,9 @@ async def get_trends():
     else:
         trend = "stable"
 
-    # Compute % change
     mtbf_change_pct = round((last_mtbf - first_mtbf) / max(0.001, first_mtbf) * 100, 1)
     rate_change_pct = round((runs[-1]["failure_rate_per_hour"] - runs[0]["failure_rate_per_hour"])
-                             / max(0.001, runs[0]["failure_rate_per_hour"]) * 100, 1)
+                            / max(0.001, runs[0]["failure_rate_per_hour"]) * 100, 1)
 
     return {
         "runs": runs,
@@ -322,43 +654,51 @@ async def get_trends():
     }
 
 
+def _safe_child(directory: Path, name: str) -> Path:
+    path = (directory / name).resolve()
+    if not path.is_relative_to(directory.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid analysis ID")
+    return path
+
+
 @app.get("/report/{analysis_id}/html")
 async def get_html_report(analysis_id: str):
     """
     Generate a self-contained, print-ready HTML executive report for an analysis run.
     This file can be saved and emailed by any external scheduler (cron, CI, etc.).
     """
-    # Sanitize: reject path traversal attempts
-    if '..' in analysis_id or '/' in analysis_id or '\\' in analysis_id:
+    if not ANALYSIS_ID_RE.match(analysis_id):
         raise HTTPException(status_code=400, detail="Invalid analysis ID")
 
-    log_dir = ROOT_DIR / "output" / "logs"
-    log_path = log_dir / f"{analysis_id}.json"
-    # Resolve and verify the path stays inside log_dir
-    resolved = log_path.resolve()
-    if not str(resolved).startswith(str(log_dir.resolve())):
-        raise HTTPException(status_code=400, detail="Invalid analysis ID")
-    if not log_path.exists():
+    log_path = _safe_child(rm_config.logs_dir(), f"{analysis_id}.json")
+    if not log_path.is_file():
         raise HTTPException(status_code=404, detail=f"Analysis {analysis_id} not found")
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            entry = json.load(f)
+        if not isinstance(entry, dict):
+            raise ValueError("archive entry is not a JSON object")
+    except (OSError, UnicodeDecodeError, ValueError):
+        logger.error("Archive record %s is unreadable or corrupt", log_path, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Analysis {analysis_id} record is corrupt")
 
-    with open(log_path, "r") as f:
-        entry = json.load(f)
-
-    summary = entry.get("summary", {})
-    tf = summary.get("total_failures", 0)
-    dh = summary.get("duration_hours", 0)
+    summary = entry.get("summary") or {}
+    tf = summary.get("total_failures", 0) or 0
+    dh = summary.get("duration_hours", 0) or 0
     mtbf = round(dh / max(1, tf), 2)
     failure_rate = round(tf / max(0.01, dh), 2)
-    safe_file = _html.escape(entry.get('file', 'N/A'))
-    safe_date = _html.escape(entry.get('date', 'N/A'))
+    safe_file = _html.escape(str(entry.get('file', 'N/A')))
+    safe_date = _html.escape(str(entry.get('date', 'N/A')))
     safe_id = _html.escape(analysis_id)
+    generated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
 
-    # Find the reliability plot for this run (persisted during analysis)
-    report_plot = ROOT_DIR / "output" / "plots" / f"{analysis_id}_reliability.png"
+    report_plot = _safe_child(rm_config.plots_dir(), f"{analysis_id}_reliability.png")
     reliability_b64 = ""
-    if report_plot.exists():
-        with open(report_plot, "rb") as pf:
-            reliability_b64 = base64.b64encode(pf.read()).decode("utf-8")
+    if report_plot.is_file():
+        try:
+            reliability_b64 = base64.b64encode(report_plot.read_bytes()).decode("utf-8")
+        except OSError:
+            logger.warning("Could not read report plot %s", report_plot, exc_info=True)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -387,8 +727,8 @@ async def get_html_report(analysis_id: str):
 </head>
 <body>
 <div class="header">
-  <h1>🔬 Reliability Executive Report</h1>
-  <p class="meta">Analysis ID: {safe_id} &middot; File: {safe_file} &middot; Date: {safe_date}</p>
+  <h1>Reliability Executive Report</h1>
+  <p class="meta">Analysis ID: {safe_id} &middot; File: {safe_file} &middot; Date: {safe_date} UTC</p>
 </div>
 
 <div class="kpi-grid">
@@ -402,7 +742,7 @@ async def get_html_report(analysis_id: str):
   <h2>Executive Summary</h2>
   <p>
     This report presents the results of a software reliability growth analysis
-    conducted on <strong>{dh:.1f} hours</strong> of failure data containing
+    conducted on <strong>{float(dh):.1f} hours</strong> of failure data containing
     <strong>{tf} incidents</strong>. The Mean Time Between Failures (MTBF) is
     <strong>{mtbf} hours</strong> with a failure rate of
     <strong>{failure_rate} failures per hour</strong>.
@@ -422,7 +762,7 @@ async def get_html_report(analysis_id: str):
 </div>''' if reliability_b64 else ''}
 
 <div class="footer">
-  Reliability Modeler &middot; Internal Use Only &middot; Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC
+  Reliability Modeler {__version__} &middot; Internal Use Only &middot; Generated {generated} UTC
 </div>
 </body>
 </html>"""
@@ -430,141 +770,110 @@ async def get_html_report(analysis_id: str):
     return {"html": html, "analysis_id": analysis_id}
 
 
+# ── Configuration ────────────────────────────────────────────────────────────
 @app.get("/config")
 async def get_config():
-    # Priority: Local ROOT_DIR config, then Docker-style /app config
-    config_path = ROOT_DIR / "fault_categories.conf"
-    if not config_path.exists():
-        config_path = Path("/app/fault_categories.conf")
-    
-    if config_path.exists():
-        with open(config_path, "r") as f:
-            content = f.read()
-        return {"content": content, "settings": load_persistent_settings()}
-    return {"content": "", "settings": load_persistent_settings()}
+    path = rm_config.taxonomy_path()
+    content = ""
+    if path.is_file():
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            logger.error("Failed to read taxonomy %s", path, exc_info=True)
+            raise HTTPException(status_code=500, detail="taxonomy not loaded")
+    return {"content": content, "settings": load_persistent_settings()}
 
-def _validate_taxonomy(content: str) -> bool:
-    """Basic validation: each non-comment, non-empty line must have Category[keywords] format."""
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith('#'):
-            continue
-        if '[' not in stripped or ']' not in stripped:
-            return False
-    return True
 
 @app.post("/config")
-async def save_config(data: dict):
-    if "content" in data:
-        if not _validate_taxonomy(data["content"]):
-            raise HTTPException(status_code=400, detail="Invalid taxonomy format. Each line must be: Category [keyword1, keyword2]")
-        config_path = ROOT_DIR / "fault_categories.conf"
+async def save_config(update: ConfigUpdate):
+    if update.content is None and update.settings is None:
+        raise HTTPException(status_code=422, detail="Provide 'content' and/or 'settings'")
+    if update.content is not None:
+        path = rm_config.taxonomy_path()
         try:
-            with open(config_path, "w") as f:
-                f.write(data["content"])
-                f.flush()
-                os.fsync(f.fileno())
-            logger.info(f"Config updated: {config_path}")
-        except IOError as e:
-            logger.error(f"Failed to write config: {e}")
+            await asyncio.to_thread(rm_config.atomic_write_text, path, update.content)
+        except OSError:
+            logger.error("Failed to write taxonomy %s", path, exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to save configuration")
-    
-    if "settings" in data:
-        settings_data = data["settings"]
-        if "optimization_method" in settings_data:
-            if settings_data["optimization_method"] not in VALID_OPTIMIZATION_METHODS:
-                raise HTTPException(status_code=400, detail=f"Invalid optimization method. Choose from: {', '.join(sorted(VALID_OPTIMIZATION_METHODS))}")
+        logger.info("Taxonomy updated: %s", path)
+    if update.settings is not None:
+        path = rm_config.settings_path()
         try:
-            tmp_path = BASE_DIR / ".settings.json.tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(settings_data, f)
-                f.flush()
-                os.fsync(f.fileno())
-            tmp_path.replace(BASE_DIR / "settings.json")
-            logger.info("Settings updated")
-        except IOError as e:
-            logger.error(f"Failed to write settings: {e}")
+            await asyncio.to_thread(rm_config.atomic_write_json, path, update.settings.model_dump())
+        except OSError:
+            logger.error("Failed to write settings %s", path, exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to save settings")
-            
+        logger.info("Settings updated: %s", path)
     return {"status": "success"}
 
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "version": "2.8.0", "timestamp": datetime.now().isoformat()}
 
+# ── Analysis pipeline ────────────────────────────────────────────────────────
 def _compute_aic(ll: float, k: int) -> float:
     """Shared AIC calculation: AIC = 2k - 2ln(L)"""
     return 2 * k - 2 * ll
 
-async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: float):
-    """Core analysis: fit models, build plots, archive, and graph — from already-normalized data."""
+
+def new_analysis_id(now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return f"AN-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+
+
+def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dict:
+    """Core analysis (CPU-bound, runs in a worker thread): fit models, plot, archive, graph."""
+    settings = load_persistent_settings()
+
+    T = float(t[-1])
+    n = len(t)
+    tt = np.linspace(0, T + future_hours, 200)
+
+    results_list = []
+    curves = {}
+    curves_intensity = {}
+    fit_data = {}
+
+    for m in ['go', 'mo']:
+        try:
+            params, ll, se, total_exp = fit_model(t, T, model_name=m, method=settings.optimization_method,
+                                                  tol=settings.tolerance)
+        except Exception:
+            logger.exception("Model fitting failed for %s", m)
+            continue
+        if params is None:
+            logger.warning("Model %s failed to converge", m)
+            continue
+
+        name = "Goel-Okumoto" if m == 'go' else "Musa-Okumoto"
+        curves[m] = go_mu(tt, params) if m == 'go' else mo_mu(tt, params)
+        curves_intensity[m] = go_intensity(tt, params) if m == 'go' else mo_intensity(tt, params)
+        fit_data[m] = (params, ll, se, name)
+
+        if m == 'go':
+            param_map = {"a": float(params[0]), "b": float(params[1])}
+        else:
+            param_map = {"lambda0": float(params[0]), "theta": float(params[1])}
+
+        results_list.append({
+            "id": m,
+            "name": name,
+            "aic": round(_compute_aic(ll, len(params)), 4),
+            "total_expected_failures": round(float(total_exp), 2) if total_exp is not None else None,
+            "parameters": param_map,
+        })
+
+    log_id = new_analysis_id()
+    temp_dir = rm_config.temp_plots_dir()
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    prefix_name = f"plot_{uuid.uuid4().hex}"
+    prefix = str(temp_dir / prefix_name)
+    plots_b64 = {}
     try:
-        settings = load_persistent_settings()
-        if settings.optimization_method not in VALID_OPTIMIZATION_METHODS:
-            settings.optimization_method = "L-BFGS-B"
-
-        # 2. Fit models
-        T = float(t[-1])
-        n = len(t)
-        tt = np.linspace(0, T + future_hours, 200)
-        
-        results_list = []
-        curves = {}
-        curves_intensity = {}
-        fit_data = {}
-
-        for m in ['go', 'mo']:
-            try:
-                params, ll, se, total_exp = fit_model(t, T, model_name=m, method=settings.optimization_method, tol=settings.tolerance)
-            except Exception as model_err:
-                logger.error(f"Model fitting failed for {m}: {model_err}")
-                continue
-            if params is None:
-                logger.warning(f"Model {m} failed to converge")
-                continue
-                
-            name = "Goel-Okumoto" if m == 'go' else "Musa-Okumoto"
-            
-            mu = go_mu(tt, params) if m == 'go' else mo_mu(tt, params)
-            intensity = go_intensity(tt, params) if m == 'go' else mo_intensity(tt, params)
-            
-            curves[m] = mu
-            curves_intensity[m] = intensity
-            
-            # For plot_reliability_growth which expects specific results dict
-            fit_data[m] = (params, ll, se, name) 
-
-            param_map = {}
-            if m == 'go':
-                param_map = {"a": float(params[0]), "b": float(params[1])}
-            else:
-                param_map = {"lambda0": float(params[0]), "theta": float(params[1])}
-
-            k = len(params)
-            aic = _compute_aic(ll, k)
-
-            results_list.append({
-                "id": m,
-                "name": name,
-                "aic": round(aic, 4),
-                "total_expected_failures": round(float(total_exp), 2) if total_exp is not None else None,
-                "parameters": param_map
-            })
-
-        # 3. Plots
-        log_id = f"AN-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        plots_b64 = {}
-        temp_plots = ROOT_DIR / "temp_plots"
-        temp_plots.mkdir(exist_ok=True)
-        prefix = str(temp_plots / f"plot_{datetime.now().strftime('%H%M%S')}")
-
         rel_plot = plot_reliability_growth(t, n, curves, fit_data, None, tt, prefix)
         intensity_plot = plot_failure_intensity(tt, curves_intensity, None, prefix)
         cat_plot = plot_categories(categorized, prefix)
 
         # Persist the reliability plot so the HTML report can embed it later
         if rel_plot and os.path.exists(rel_plot):
-            report_plot_dir = ROOT_DIR / "output" / "plots"
+            report_plot_dir = rm_config.plots_dir()
             report_plot_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy(rel_plot, report_plot_dir / f"{log_id}_reliability.png")
 
@@ -572,191 +881,207 @@ async def _analyze_from_data(t, categorized, t0, filename: str, future_hours: fl
             if path and os.path.exists(path):
                 with open(path, "rb") as f:
                     plots_b64[name] = base64.b64encode(f.read()).decode('utf-8')
-                os.remove(path)
+    finally:
+        for leftover in temp_dir.glob(f"{prefix_name}*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                logger.warning("Could not remove temp plot %s", leftover, exc_info=True)
 
-        # 4. Save to archive
-        save_to_archive(log_id, filename, {
-            "total_failures": n,
-            "duration_hours": round(T, 2)
-        })
+    save_to_archive(log_id, filename, {"total_failures": n, "duration_hours": round(T, 2)})
 
-        # Store categorized data for GraphQL graph queries
-        store_analysis_data(log_id, categorized)
-
-        # 5. Build graph analytics (non-blocking — returns None if networkx missing)
-        graph_report = build_failure_graphs(categorized)
-        graph_insights = generate_graph_insights(graph_report) if graph_report else []
-        graph_summary = None
-        if graph_report:
-            graph_summary = {
-                "keystone_categories": [
-                    {"name": c.node, "pagerank": c.pagerank, "is_bridge": c.is_bridge}
-                    for c in graph_report.centrality if c.is_keystone
-                ],
-                "top_cascade": (
-                    {"chain": " → ".join(graph_report.cascade_chains[0].chain),
-                     "confidence": graph_report.cascade_chains[0].confidence}
-                    if graph_report.cascade_chains else None
-                ),
-                "num_communities": graph_report.metrics.num_communities,
-                "graph_density": graph_report.metrics.graph_density,
-                "graph_json": graph_report.graph_json,
-            }
-
-        return {
-            "id": log_id,
-            "summary": {
-                "total_failures": n,
-                "duration_hours": round(T, 2),
-                "start_time": t0.isoformat() if hasattr(t0, 'isoformat') else str(t0)
-            },
-            "models": results_list,
-            "plots": plots_b64,
-            "categorized_failures": categorized[:100],
-            "graph_insights": graph_insights,
-            "graph_report": graph_summary,
+    # Store categorized data for GraphQL graph queries and prime the report cache
+    gql.store_analysis_data(log_id, categorized)
+    graph_report = gql.get_failure_report(log_id, categorized=categorized)
+    graph_insights = generate_graph_insights(graph_report) if graph_report else []
+    graph_summary = None
+    if graph_report:
+        graph_summary = {
+            "keystone_categories": [
+                {"name": c.node, "pagerank": c.pagerank, "is_bridge": c.is_bridge}
+                for c in graph_report.centrality if c.is_keystone
+            ],
+            "top_cascade": (
+                {"chain": " → ".join(graph_report.cascade_chains[0].chain),
+                 "confidence": graph_report.cascade_chains[0].confidence}
+                if graph_report.cascade_chains else None
+            ),
+            "num_communities": graph_report.metrics.num_communities,
+            "graph_density": graph_report.metrics.graph_density,
+            "graph_json": graph_report.graph_json,
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Pipeline error: {str(e)}", exc_info=True)
+
+    return {
+        "id": log_id,
+        "summary": {
+            "total_failures": n,
+            "duration_hours": round(T, 2),
+            "start_time": t0.isoformat() if hasattr(t0, 'isoformat') else str(t0),
+        },
+        "models": results_list,
+        "plots": plots_b64,
+        "categorized_failures": categorized[:100],
+        "graph_insights": graph_insights,
+        "graph_report": graph_summary,
+    }
+
+
+async def _analyze(t, categorized, t0, filename: str, future_hours: float) -> dict:
+    """Run the analysis off the event loop with a real timeout."""
+    started = time.perf_counter()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_run_analysis, t, categorized, t0, filename, future_hours),
+            timeout=ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        metrics.observe_analysis("timeout", time.perf_counter() - started)
+        logger.error("Analysis of %s timed out after %ss", filename, ANALYSIS_TIMEOUT_SECONDS)
+        raise HTTPException(status_code=504, detail="Analysis timed out. Try a narrower time window.")
+    except Exception:
+        metrics.observe_analysis("error", time.perf_counter() - started)
+        logger.exception("Analysis pipeline failed for %s", filename)
         raise HTTPException(status_code=500, detail="Analysis failed. Please check your data and try again.")
+    metrics.observe_analysis("success", time.perf_counter() - started)
+    return result
+
+
+def _sentry_token() -> str:
+    token = os.getenv("SENTRY_AUTH_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=503, detail="SENTRY_AUTH_TOKEN not configured on the API server")
+    return token
+
 
 @app.post("/ingest/sentry")
-async def ingest_sentry(payload: dict):
+async def ingest_sentry(payload: SentryIngestRequest):
     """
     Pull failure events from Sentry and run the reliability analysis.
 
     Body:
         {"org": "my-org", "project": "my-project", "days": 30, "future_hours": 1000}
         {"org": "my-org", "project": "all", "days": 30, "future_hours": 1000}   # aggregate all projects
-
-    Requires SENTRY_AUTH_TOKEN env var to be set on the API server.
     """
-    org = payload.get("org")
-    project = payload.get("project")
-    if not org:
-        raise HTTPException(status_code=400, detail="'org' is required")
-    if not project:
-        raise HTTPException(status_code=400, detail="'project' is required (use 'all' to aggregate every project)")
+    auth_token = _sentry_token()
+    org, project, days = payload.org, payload.project, payload.days
 
-    auth_token = os.getenv("SENTRY_AUTH_TOKEN", "")
-    if not auth_token:
-        raise HTTPException(status_code=503, detail="SENTRY_AUTH_TOKEN not configured on the API server")
-
-    days = int(payload.get("days", 30))
-    if days < 1 or days > 365:
-        raise HTTPException(status_code=400, detail="'days' must be between 1 and 365")
-
-    future_hours = float(payload.get("future_hours", 1000.0))
-    if not np.isfinite(future_hours) or future_hours < MIN_FUTURE_HOURS or future_hours > MAX_FUTURE_HOURS:
-        raise HTTPException(status_code=400, detail=f"future_hours must be between {MIN_FUTURE_HOURS} and {MAX_FUTURE_HOURS}")
-
-    config_path = ROOT_DIR / "fault_categories.conf"
-    if not config_path.exists():
-        config_path = Path("/app/fault_categories.conf")
-
-    project_counts = {}
+    config_path = rm_config.taxonomy_path()
     try:
-        settings = load_persistent_settings()
+        await asyncio.to_thread(load_fault_categories, config_path)
+    except TaxonomyError as e:
+        logger.error("Taxonomy not loaded: %s", e)
+        raise HTTPException(status_code=500, detail="taxonomy not loaded")
+
+    settings = load_persistent_settings()
+    cancel = threading.Event()
+    project_counts: Dict[str, int] = {}
+    try:
         if project == "all":
             t, categorized, t0, _, project_counts = await asyncio.wait_for(
-                asyncio.to_thread(
-                    load_sentry_failures_all,
-                    org, auth_token, config_path, days,
-                    settings.multi_label,
-                ),
-                timeout=_ANALYSIS_TIMEOUT_SECONDS,
+                asyncio.to_thread(load_sentry_failures_all, org, auth_token, config_path, days,
+                                  settings.multi_label, cancel_event=cancel),
+                timeout=ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/ALL_PROJECTS ({days}d)"
         else:
             t, categorized, t0, _ = await asyncio.wait_for(
-                asyncio.to_thread(
-                    load_sentry_failures,
-                    org, project, auth_token, config_path, days,
-                    settings.multi_label,
-                ),
-                timeout=_ANALYSIS_TIMEOUT_SECONDS,
+                asyncio.to_thread(load_sentry_failures, org, project, auth_token, config_path, days,
+                                  settings.multi_label, cancel_event=cancel),
+                timeout=ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/{project} ({days}d)"
     except asyncio.TimeoutError:
-        logger.error(f"Sentry ingest timed out for {org}/{project}")
+        cancel.set()  # stop the worker thread at its next page / retry boundary
+        metrics.ingest_failed()
+        logger.error("Sentry ingest timed out for %s/%s", org, project)
         raise HTTPException(status_code=504, detail="Sentry fetch timed out. Try a narrower time window or a single project.")
+    except TaxonomyError as e:
+        logger.error("Taxonomy not loaded: %s", e)
+        raise HTTPException(status_code=500, detail="taxonomy not loaded")
+    except SentryCancelled:
+        metrics.ingest_failed()
+        raise HTTPException(status_code=504, detail="Sentry fetch was cancelled")
     except SentryError as e:
-        logger.error(f"Sentry ingest failed: {e}")
+        metrics.ingest_failed()
+        logger.error("Sentry ingest failed for %s/%s: %s", org, project, e)
         raise HTTPException(status_code=502, detail=str(e))
 
     if len(t) == 0:
         raise HTTPException(status_code=400, detail=f"No failure events found in Sentry for {org}/{project} in the last {days} days")
 
-    result = await asyncio.wait_for(
-        _analyze_from_data(t, categorized, t0, display_name, future_hours),
-        timeout=_ANALYSIS_TIMEOUT_SECONDS
-    )
-
-    # Attach per-project breakdown when aggregating all projects
+    result = await _analyze(t, categorized, t0, display_name, payload.future_hours)
     if project_counts:
         result["projects"] = dict(sorted(project_counts.items(), key=lambda kv: kv[1], reverse=True))
     return result
 
 
 @app.get("/ingest/sentry/projects")
-async def list_sentry_projects_endpoint(org: str):
+async def list_sentry_projects_endpoint(org: str = ""):
     """
-    List all projects in a Sentry organization. Returns [{slug, name, platform}, ...].
+    List all projects in a Sentry organization. Returns [{slug, name}, ...].
     Requires SENTRY_AUTH_TOKEN env var.
     """
     if not org:
-        raise HTTPException(status_code=400, detail="'org' query parameter is required")
-    auth_token = os.getenv("SENTRY_AUTH_TOKEN", "")
-    if not auth_token:
-        raise HTTPException(status_code=503, detail="SENTRY_AUTH_TOKEN not configured on the API server")
+        raise HTTPException(status_code=422, detail="'org' query parameter is required")
+    if not re.match(_SLUG_PATTERN, org) or len(org) > 100:
+        raise HTTPException(status_code=422, detail="Invalid org slug")
+    auth_token = _sentry_token()
+    cancel = threading.Event()
     try:
-        projects = await asyncio.to_thread(list_sentry_projects, org, auth_token)
+        projects = await asyncio.wait_for(
+            asyncio.to_thread(list_sentry_projects, org, auth_token, None, cancel),
+            timeout=ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        cancel.set()
+        raise HTTPException(status_code=504, detail="Sentry project listing timed out")
     except SentryError as e:
+        logger.error("Sentry project listing failed for %s: %s", org, e)
         raise HTTPException(status_code=502, detail=str(e))
     return {
         "org": org,
         "count": len(projects),
         "projects": [
             {"slug": p.get("slug", ""), "name": p.get("name", p.get("slug", ""))}
-            for p in projects
+            for p in projects if isinstance(p, dict)
         ],
     }
 
 
+# ── GraphQL ──────────────────────────────────────────────────────────────────
 @app.post("/graphql")
 async def graphql_query(request: Request):
     """GraphQL endpoint for flexible failure graph queries."""
-    # Enforce body size limit
     body_bytes = await request.body()
-    if len(body_bytes) > 256 * 1024:  # 256 KB max
-        raise HTTPException(status_code=413, detail="GraphQL query too large (max 256 KB)")
+    if len(body_bytes) > MAX_GRAPHQL_BYTES:
+        raise HTTPException(status_code=413, detail=f"GraphQL query too large (max {MAX_GRAPHQL_BYTES // 1024} KB)")
     try:
         body = json.loads(body_bytes)
-    except Exception:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    
-    query_str = body.get("query", "")
-    variables = body.get("variables", {})
-    
-    if not query_str:
-        raise HTTPException(status_code=400, detail="Missing 'query' field")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
 
-    # Reject introspection queries (schema/type disclosure), but allow __typename
-    if re.search(r'__schema\b|__type\b', query_str):
-        raise HTTPException(status_code=403, detail="Introspection is disabled")
-    
+    query_str = body.get("query")
+    variables = body.get("variables") or None
+    operation_name = body.get("operationName") or None
+    if not isinstance(query_str, str) or not query_str.strip():
+        raise HTTPException(status_code=400, detail="Missing 'query' field")
+    if variables is not None and not isinstance(variables, dict):
+        raise HTTPException(status_code=400, detail="'variables' must be an object")
+    if operation_name is not None and not isinstance(operation_name, str):
+        raise HTTPException(status_code=400, detail="'operationName' must be a string")
+
     try:
-        result = schema.execute(query_str, variable_values=variables)
-    except Exception as e:
-        logger.error(f"GraphQL execution error: {e}")
-        raise HTTPException(status_code=500, detail="GraphQL query execution failed")
-    
-    if result.errors:
-        return {"data": result.data, "errors": [str(e) for e in result.errors]}
-    
-    return {"data": result.data}
+        result, ok = await asyncio.wait_for(
+            asyncio.to_thread(gql.execute_query, query_str, variables, operation_name),
+            timeout=ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="GraphQL query timed out")
+    if not ok:
+        return JSONResponse(status_code=400, content={"detail": "; ".join(result["errors"]), **result})
+    return result
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Bug, Loader2, Search, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { apiFetch } from '@/app/apiClient';
+import { formatError } from '@/lib/api';
 
 interface SentryViewProps {
     onAnalyze: (org: string, project: string, days: number) => Promise<void>;
@@ -27,14 +27,14 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
             setError('Enter a project slug or enable "Analyze all projects".');
             return;
         }
-        if (days < 1 || days > 365) {
-            setError('Days must be between 1 and 365.');
+        if (days < 1 || days > 90) {
+            setError('Days must be between 1 and 90.');
             return;
         }
         try {
             await onAnalyze(org.trim(), analyzeAll ? 'all' : project.trim(), days);
-        } catch (err: any) {
-            setError(err.message || 'Failed to pull data from Sentry.');
+        } catch (err) {
+            setError(formatError(err) || 'Failed to pull data from Sentry.');
         }
     };
 
@@ -100,7 +100,7 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
                         <input
                             type="number"
                             min={1}
-                            max={365}
+                            max={90}
                             value={days}
                             onChange={(e) => setDays(parseInt(e.target.value) || 30)}
                             className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
@@ -128,7 +128,7 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
             </form>
 
             {error && (
-                <div className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-start space-x-3">
+                <div role="alert" className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-start space-x-3">
                     <AlertCircle className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" />
                     <p className="text-sm text-rose-300">{error}</p>
                 </div>

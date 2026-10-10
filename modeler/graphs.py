@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Set
 
 import numpy as np
+
+from .data import UNCATEGORIZED
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +54,9 @@ class CentralityScore:
 class CascadeChain:
     """A directional failure cascade: trigger → intermediary → ... → victim."""
     chain: List[str]
-    occurrence_count: int
-    avg_latency_hours: float
-    confidence: float               # occurrence_count / total_cascades
+    occurrence_count: int           # distinct trigger events from which this sequence recurred
+    avg_latency_hours: float        # mean time from the trigger to the last failure in the chain
+    confidence: float               # occurrence_count / number of events containing the trigger
 
 
 @dataclass
@@ -134,8 +136,9 @@ def build_failure_graphs(
         cats = [c.strip() for c in str(row[2]).split(",") if c.strip()]
         desc = str(row[3]) if len(row) > 3 else ""
         if not cats:
-            cats = ["Uncategorized"]
+            cats = [UNCATEGORIZED]
         events.append((time_h, cats, desc))
+    events.sort(key=lambda e: e[0])
 
     all_categories = sorted(set(c for _, cats, _ in events for c in cats))
     if len(all_categories) < 2:
@@ -222,31 +225,33 @@ def build_failure_graphs(
             G_cascade.add_node(cat)
 
     # ── 3. Analytics ──────────────────────────────────────────────────────
+    cascade_chains = _extract_cascade_chains(events, G_cascade, cascade_window_hours)
     return _compute_graph_analytics(G_cooc, G_cascade, all_categories,
-                                    cascade_counter, cascade_latencies,
-                                    cooc_counter, cat_sets, total_cascades)
+                                    cascade_chains, cooc_counter, cat_sets)
 
 
 def _compute_graph_analytics(
     G_cooc: "nx.Graph",
     G_cascade: "nx.DiGraph",
     all_categories: List[str],
-    cascade_counter: Counter,
-    cascade_latencies: Dict,
+    cascade_chains: List[CascadeChain],
     cooc_counter: Counter,
     cat_sets: List[Set[str]],
-    total_cascades: int,
 ) -> FailureGraphReport:
 
     # ── Centrality ────────────────────────────────────────────────────────
     try:
         pagerank = nx.pagerank(G_cooc, weight='weight')
     except Exception:
+        logger.warning("PageRank failed on %d-node co-occurrence graph; using uniform scores",
+                       G_cooc.number_of_nodes(), exc_info=True)
         pagerank = {c: 1.0 / max(1, len(all_categories)) for c in all_categories}
 
     try:
         betweenness = nx.betweenness_centrality(G_cooc, weight='weight', normalized=True)
     except Exception:
+        logger.warning("Betweenness centrality failed on %d-node co-occurrence graph; using zeros",
+                       G_cooc.number_of_nodes(), exc_info=True)
         betweenness = {c: 0.0 for c in all_categories}
 
     pr_threshold = np.percentile(list(pagerank.values()), 80) if pagerank else 0
@@ -264,10 +269,6 @@ def _compute_graph_analytics(
             is_bridge=bool(betweenness.get(cat, 0) >= bw_threshold),
         ))
     centrality.sort(key=lambda x: x.pagerank, reverse=True)
-
-    # ── Cascade Chains (depth-3 paths from cascade graph) ─────────────────
-    cascade_chains = _extract_cascade_chains(G_cascade, cascade_counter,
-                                              cascade_latencies, total_cascades)
 
     # ── Community Detection (Louvain) ─────────────────────────────────────
     communities = []
@@ -290,8 +291,9 @@ def _compute_graph_analytics(
                 internal_density=round(density, 4),
             ))
         communities.sort(key=lambda c: c.size, reverse=True)
-    except Exception as e:
-        logger.debug(f"Community detection skipped: {e}")
+    except Exception:
+        logger.warning("Louvain community detection failed on %d-node graph; no communities reported",
+                       G_cooc.number_of_nodes(), exc_info=True)
 
     # ── Co-occurrence Edges ───────────────────────────────────────────────
     cooc_edges = []
@@ -311,6 +313,7 @@ def _compute_graph_analytics(
     try:
         diameter = nx.diameter(G_cooc) if nx.is_connected(G_cooc) else None
     except Exception:
+        logger.warning("Diameter computation failed; reporting None", exc_info=True)
         diameter = None
 
     metrics = GraphMetrics(
@@ -348,72 +351,82 @@ def _compute_graph_analytics(
 
 
 def _extract_cascade_chains(
+    events: List[Tuple[float, List[str], str]],
     G_cascade: "nx.DiGraph",
-    cascade_counter: Counter,
-    cascade_latencies: Dict,
-    total_cascades: int,
+    cascade_window_hours: float,
     max_depth: int = 3,
+    lookahead: int = 20,
+    top_n: int = 10,
 ) -> List[CascadeChain]:
-    """Extract the most common failure cascade chains from the directed graph."""
-    chains: Dict[Tuple[str, ...], List[float]] = defaultdict(list)
+    """Count how often each cascade *sequence* recurs along the event timeline.
 
-    # BFS from each node to find paths
-    for src in G_cascade.nodes():
-        _dfs_paths(G_cascade, src, [], set(), max_depth, cascade_counter,
-                    cascade_latencies, chains)
+    A chain ``A -> B -> C`` occurs at trigger event ``i`` when ``i`` contains
+    ``A`` and there are later events ``j`` (containing ``B``) and ``k``
+    (containing ``C``) with ``0 < t_j - t_i <= window`` and
+    ``0 < t_k - t_j <= window``. Only steps that are recurring cascade edges in
+    ``G_cascade`` are followed, and categories never repeat within a chain.
 
-    result = []
-    for chain_tuple, latencies in sorted(chains.items(), key=lambda x: len(x[1]), reverse=True)[:10]:
-        chain_list = list(chain_tuple)
-        occ = len(latencies)
-        result.append(CascadeChain(
-            chain=chain_list,
-            occurrence_count=occ,
-            avg_latency_hours=round(float(np.mean(latencies)), 2),
-            confidence=round(occ / max(1, total_cascades), 4),
-        ))
-    return result
+    ``occurrence_count`` is the number of *distinct trigger events* at which
+    the sequence occurs, so a pattern seen on five separate occasions counts
+    five, regardless of how many overlapping continuations each occasion has.
+    ``avg_latency_hours`` is the mean, over those occurrences, of the earliest
+    time from trigger to the chain's final failure. ``confidence`` is
+    ``occurrence_count`` divided by the number of events that contain the
+    trigger category, i.e. how often the trigger is followed by this cascade.
+    """
+    if G_cascade.number_of_edges() == 0:
+        return []
 
+    times = [e[0] for e in events]
+    trigger_totals: Counter = Counter()
+    occurrences: Dict[Tuple[str, ...], List[float]] = defaultdict(list)
 
-def _dfs_paths(
-    G: "nx.DiGraph",
-    node: str,
-    path: List[str],
-    visited: Set[str],
-    max_depth: int,
-    cascade_counter: Counter,
-    cascade_latencies: Dict,
-    chains: Dict[Tuple[str, ...], List[float]],
-):
-    """Depth-first search to collect cascade paths."""
-    if len(path) >= max_depth:
-        return
-    if node in visited:
-        return
+    for i, (t_i, cats_i, _) in enumerate(events):
+        for start in set(cats_i):
+            trigger_totals[start] += 1
+            if not G_cascade.has_node(start) or G_cascade.out_degree(start) == 0:
+                continue
+            # frontier: chain tuple -> sorted event indices where it can end
+            frontier: Dict[Tuple[str, ...], List[int]] = {(start,): [i]}
+            found: Dict[Tuple[str, ...], float] = {}
+            for _depth in range(1, max_depth):
+                next_frontier: Dict[Tuple[str, ...], Set[int]] = defaultdict(set)
+                for chain, end_indices in frontier.items():
+                    last = chain[-1]
+                    successors = set(G_cascade.successors(last)) - set(chain)
+                    if not successors:
+                        continue
+                    for k in end_indices:
+                        t_k = times[k]
+                        for j in range(k + 1, min(k + 1 + lookahead, len(events))):
+                            gap = times[j] - t_k
+                            if gap > cascade_window_hours:
+                                break
+                            if gap <= 0:
+                                continue
+                            for dst in successors.intersection(events[j][1]):
+                                next_frontier[chain + (dst,)].add(j)
+                frontier = {c: sorted(idx) for c, idx in next_frontier.items()}
+                for chain, end_indices in frontier.items():
+                    found[chain] = times[end_indices[0]] - t_i
+                if not frontier:
+                    break
+            for chain, latency in found.items():
+                occurrences[chain].append(latency)
 
-    new_path = path + [node]
-    new_visited = visited | {node}
-
-    if len(new_path) >= 2:
-        # Record this path as a cascade chain
-        chain_key = tuple(new_path)
-        # Sum the latencies along the edges
-        total_lat = 0.0
-        valid = True
-        for i in range(len(new_path) - 1):
-            edge = (new_path[i], new_path[i + 1])
-            lats = cascade_latencies.get(edge, [])
-            if lats:
-                total_lat += np.mean(lats)
-            else:
-                valid = False
-                break
-        if valid:
-            chains[chain_key].append(total_lat)
-
-    for successor in G.successors(node):
-        _dfs_paths(G, successor, new_path, new_visited, max_depth,
-                    cascade_counter, cascade_latencies, chains)
+    ranked = sorted(
+        occurrences.items(),
+        key=lambda kv: (-len(kv[1]), -len(kv[0]), float(np.mean(kv[1])), kv[0]),
+    )[:top_n]
+    return [
+        CascadeChain(
+            chain=list(chain),
+            occurrence_count=len(lats),
+            avg_latency_hours=round(float(np.mean(lats)), 2),
+            confidence=round(len(lats) / max(1, trigger_totals[chain[0]]), 4),
+        )
+        for chain, lats in ranked
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

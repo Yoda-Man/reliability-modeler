@@ -1,150 +1,208 @@
-# Reliability Modeler — Operations & Support Runbook
+# Reliability Modeler: Operations & Support
 
-## 1. Service Overview
+Reference for operators: architecture, persistence, monitoring, logging, troubleshooting and capacity. Step-by-step procedures (deploy, upgrade, rollback, secret rotation, backup/restore, incident table) are in [`RUNBOOK.md`](RUNBOOK.md).
 
-The Reliability Modeler is a two-tier containerized application that ingests failure data **exclusively from Sentry**:
+Applies to version **2.9.0**.
+
+## 1. Service overview
 
 ```
-┌──────────────┐     HTTP :8000     ┌──────────────┐     ┌─────────────┐
-│   Next.js UI │ ─────────────────▶ │  FastAPI API │ ──▶ │    Sentry    │
-│   Port 3000  │                    │   Port 8000  │     │  API (pull)  │
-└──────────────┘                    └──────┬───────┘     └─────────────┘
-                                          │
-                                          ▼
-                                    ┌──────────┐
-                                    │ modeler/ │  Python NHPP engine
-                                    │ output/  │  Logs & archives
-                                    └──────────┘
+Browser ──Basic auth──▶ UI (Next.js) :3000 ──/api/* proxy──▶ API (FastAPI) :8000 ──▶ Sentry API
+          (host port)    login, /healthz      X-API-Key        internal only          (pull, HTTPS)
+                                              X-Request-ID          │
+                                              X-Forwarded-For       ├── /app/config  (volume config_data)
+                                                                    └── /app/output  (volume output_data)
 ```
 
-- **API**: Python 3.13+ FastAPI server. CPU-bound (scipy optimization, matplotlib rendering).
-- **UI**: Next.js 16 client-rendered SPA. Talks to API exclusively.
-- **Data source**: Sentry (pulled on demand). No CSV upload, no CLI.
-- **No database**: State is file-based (JSON log archives, settings.json, fault_categories.conf).
+- **UI**: Next.js server. Enforces HTTP Basic auth (`UI_USERNAME`/`UI_PASSWORD`) on every route except `/healthz`. Proxies `/api/*` to `API_URL` and injects `RELIABILITY_API_KEY` server-side. Only GET/POST are proxied, bodies are limited to 1 MiB, timeout `PROXY_TIMEOUT_MS` (default 130 s).
+- **API**: Python 3.13 FastAPI. CPU-bound (scipy fits, matplotlib rendering); analysis runs in a worker thread so `/health` stays responsive. Requires `X-API-Key` on every route except `/health` and `/health/live`.
+- **Data source**: Sentry, pulled on demand. No CSV upload, no CLI.
+- **No database**: state is files on two volumes.
 
-### ⚠️ Critical: Config Persistence
+Because the browser only talks to the UI (same origin), there is no CORS involved in normal operation. `ALLOWED_ORIGINS` only matters if a browser calls the API directly, which the default deployment does not allow.
 
-`fault_categories.conf` and `settings.json` are written to the API container's local filesystem. **If the container restarts without a persistent volume, ALL configuration changes are lost.**
+## 2. Persistence
 
-| Deployment | What you need |
-|------------|---------------|
-| **Docker Compose** | Mount a volume (see `docker-compose.yml`) |
-| **Kubernetes** | Create a `PersistentVolumeClaim` and mount it at `/app` in the API pod |
-| **Bare metal** | Point config paths at persistent storage |
+| Path in API container | Compose volume | Contents | Loss impact |
+|-----------------------|----------------|----------|-------------|
+| `/app/config` | `config_data` | `fault_categories.conf`, `settings.json` | Taxonomy/settings edits revert to defaults |
+| `/app/output` | `output_data` | Log archives, persisted analyses (GraphQL), plots | History, trends and reports lost |
+| `/app/defaults/fault_categories.conf` | (in image) | Bundled default taxonomy | n/a, read-only |
 
-The startup log warns if write targets are on ephemeral storage. Check `docker logs` after deploy.
+On startup, if `CONFIG_DIR/fault_categories.conf` is missing, the API seeds it from `DEFAULT_CONFIG_PATH`. Later image upgrades **do not** overwrite an existing taxonomy in `config_data`.
 
-## 2. Common Failure Modes & Remedies
+The UI is stateless.
 
-### 2.1 "No failure events found" from Sentry ingest
+### Kubernetes
 
-**Likely causes:**
-1. **Bad or missing token** — `SENTRY_AUTH_TOKEN` not set, expired, or lacks `event:read` scope.
-   - *Fix*: Verify the token, check scopes in Sentry's "Auth Tokens" page.
-2. **Wrong org/project slug** — slugs are case-sensitive.
-   - *Fix*: Use `GET /ingest/sentry/projects?org=X` to list exact slugs.
-3. **No events in the look-back window** — the project had no errors in the selected period.
-   - *Fix*: Increase the day range or check Sentry directly.
+Mount two PersistentVolumeClaims on the API pod, **at `/app/output` and `/app/config` only**. Never mount a volume at `/app`: it would hide the application code and the bundled defaults.
 
-### 2.2 "502 Bad Gateway" on `/ingest/sentry`
+```yaml
+# API container (excerpt)
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001          # set on the pod spec so the PVCs are writable
+volumeMounts:
+  - name: output
+    mountPath: /app/output
+  - name: config
+    mountPath: /app/config
+livenessProbe:
+  httpGet: { path: /health/live, port: 8000 }
+readinessProbe:
+  httpGet: { path: /health, port: 8000 }
+volumes:
+  - name: output
+    persistentVolumeClaim: { claimName: reliability-modeler-output }
+  - name: config
+    persistentVolumeClaim: { claimName: reliability-modeler-config }
+```
 
-Sentry returned an error (401 auth, 404 not found, 429 rate-limited, or network failure). The API logs the specific reason. Check `docker logs` and grep for `Sentry ingest failed`.
+UI pod: liveness/readiness `GET /healthz` on port 3000; `API_URL` pointing at the API Service.
 
-### 2.3 "429 Too Many Requests" (Sentry rate limit)
+## 3. Health checks
 
-Pulling "all projects" across a large org can hit Sentry's API rate limits. Narrow the look-back window, or analyze a single project at a time. The connector caps 5000 events per project and skips failures gracefully.
+| Endpoint | Auth | Use | Response |
+|----------|------|-----|----------|
+| API `GET /health/live` | none | Container HEALTHCHECK / liveness | `200 {"status":"ok"}` always while the process serves |
+| API `GET /health` | none | Readiness, monitoring | see below |
+| UI `GET /healthz` | none | Container HEALTHCHECK / liveness | `200 ok` |
+| UI `GET /api/health` | UI login | End-to-end check through the proxy; drives the UI status badge | API `/health` body |
 
-### 2.4 Model fails to converge (NaN/empty results)
+`GET /health` example:
 
-Data is too sparse (< 3 events) or all timestamps are identical. Narrow the scope to a busier project or widen the time window.
+```json
+{
+  "status": "degraded",
+  "version": "2.9.0",
+  "timestamp": "2026-10-10T14:22:33.123456+00:00",
+  "checks": {
+    "output_writable": true,
+    "config_readable": true,
+    "sentry_token_configured": false
+  }
+}
+```
 
-### 2.5 Config changes not persisting after container restart
+| `status` | HTTP | Meaning |
+|----------|------|---------|
+| `ok` | 200 | All checks pass |
+| `degraded` | 200 | Only `sentry_token_configured` is false: the app runs, ingestion will fail |
+| `error` | 503 | Output volume not writable or config unreadable |
 
-Use a Docker volume mount for `fault_categories.conf` and `settings.json` (see section 1).
-
-### 2.6 UI shows "Failed to pull data from Sentry"
-
-- Check `SENTRY_AUTH_TOKEN` is set on the API container (not the UI).
-- Verify `NEXT_PUBLIC_API_URL` points at the API.
-- Check browser console for CORS errors — ensure `ALLOWED_ORIGINS` includes the UI origin.
-
-## 3. Logging & Monitoring
-
-### API Logs
-- Format: JSON-structured to stdout
-- Fields: `time`, `level`, `logger`, `message`
-- Each request gets an `X-Request-ID` header for correlation.
-- Log level: `INFO` by default.
+Since port 8000 is not published, check the API from inside the network:
 
 ```bash
-docker logs reliability-modeler-api-1
-docker logs -f reliability-modeler-api-1 2>&1 | grep '"level": "ERROR"'
+docker compose exec api python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/health').read().decode())"
+curl -u admin:"$UI_PASSWORD" http://localhost:3000/api/health
 ```
 
-### Health Checks
-- **Endpoint**: `GET /health` → `{"status": "ok", "version": "2.7.0", "timestamp": "..."}`
-- Use for load balancer probes. Expected: HTTP 200, response < 100ms.
+## 4. Metrics and alerting
 
-## 4. Deployment & Rollback
+`GET /metrics` (API, requires `X-API-Key`) returns Prometheus text format:
 
-### Deploy
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `rm_http_requests_total` | counter | `method`, `status` | HTTP requests served |
+| `rm_analyses_total` | counter | `result` | Analyses run, by outcome |
+| `rm_analysis_duration_seconds_sum` / `_count` | summary-style counters | none | Total analysis time and count (average = sum / count) |
+| `rm_ingest_failures_total` | counter | none | Failed Sentry ingests |
+
+The endpoint requires the `X-API-Key` header, so the scraper must be able to send a custom header and must run inside the compose/cluster network (port 8000 is not published). Use your scraper's custom-header option if it has one, or a small header-injecting reverse proxy / sidecar in front of `api:8000/metrics`.
+
+Suggested alerts (tune thresholds to your environment):
+
+| Alert | Condition (example) | Severity |
+|-------|---------------------|----------|
+| API not healthy | `/health` non-200 for 5 min (blackbox probe) | page |
+| API degraded | `/health` status `degraded` for 30 min | ticket |
+| Ingest failures | `increase(rm_ingest_failures_total[15m]) > 3` | ticket |
+| Slow analyses | average or p95 analysis duration > 60 s over 30 min (`rate(rm_analysis_duration_seconds_sum[30m]) / rate(rm_analysis_duration_seconds_count[30m])`; true p95 needs a histogram, so approximate with the average) | ticket |
+| Server errors | `sum(rate(rm_http_requests_total{status=~"5.."}[5m])) > 0.1` | ticket |
+| Container restarts | restart count increased in 15 min (`docker inspect -f '{{.RestartCount}}'`, cAdvisor or kube-state-metrics) | page if repeated |
+| Disk usage | filesystem holding `output_data` > 80% | ticket |
+
+## 5. Logging
+
+Both services log to stdout. The API logs one JSON object per line:
+
+```json
+{"ts": "2026-10-10T14:22:33.123Z", "level": "INFO", "logger": "reliability_api", "msg": "Analysis complete", "request_id": "3f2c9a1e-..."}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `ts` | UTC timestamp |
+| `level` | `DEBUG`/`INFO`/`WARNING`/`ERROR` (set with `LOG_LEVEL`) |
+| `logger` | Python logger name |
+| `msg` | Message (never contains the API key or Sentry token) |
+| `request_id` | Value of `X-Request-ID` for the request, or empty for background work |
+
+The UI proxy logs its errors server-side as JSON as well. Compose keeps container logs with the json-file driver, rotated at 10 MB x 5 files per container.
+
 ```bash
-# Build and push images
-make build push IMAGE_TAG=v2.7.0
-
-# On target host
-docker-compose pull
-docker-compose up -d
+docker compose logs -f api
+docker compose logs api | grep '"level": "ERROR"'
+docker compose logs api ui | grep '<request-id>'     # correlate one request across UI and API
 ```
 
-### Rollback
-```bash
-IMAGE_TAG=v2.6.0 docker-compose up -d
-```
+`X-Request-ID` is generated by the UI proxy (or accepted from the client after sanitising), forwarded to the API and returned in the response header, so a user can report the ID shown in their browser's network tab.
 
-### Verify deployment
-```bash
-curl http://localhost:8000/health
-curl http://localhost:3000  # Should return HTML
-```
+## 6. Retention
 
-## 5. Environment Variables
+`RETENTION_DAYS` (default **90**) controls automatic pruning of log archives, persisted analyses and plots in `/app/output`. Pruning runs at API startup and then once a day. `RETENTION_DAYS=0` disables automatic pruning. Manual pruning: `POST /logs/prune` (minimum 7 days).
 
-| Variable | Service | Default | Description |
-|----------|---------|---------|-------------|
-| `SENTRY_AUTH_TOKEN` | API | (required) | Sentry org token with `event:read` + `project:read` scope |
-| `SENTRY_BASE_URL` | API | `https://sentry.io/api/0/` | Override for self-hosted Sentry |
-| `ALLOWED_ORIGINS` | API | `http://localhost:3000` | Comma-separated CORS origins |
-| `RELIABILITY_API_KEY` | API + UI | (empty = disabled) | Shared secret. API validates it; UI proxy injects it server-side |
-| `API_URL` | UI | `http://localhost:8000` | Backend URL the Next.js proxy forwards to (server-side) |
-| `RATE_LIMIT_MAX` | API | `30` | Max requests per window |
-| `RATE_LIMIT_WINDOW` | API | `60` | Rate limit window (seconds) |
-| `ANALYSIS_TIMEOUT_SECONDS` | API | `120` | Max seconds per analysis request |
-| `DOCKERHUB_USERNAME` | Build | (required) | Docker Hub username for push |
-| `IMAGE_TAG` | Build | git hash | Docker image tag |
+Pruned analyses are no longer available to GraphQL, trends or reports. Take a backup first if you need long-term history (see the runbook).
 
-> **Note on authentication:** `RELIABILITY_API_KEY` is a *shared secret* for a trusted internal network, not a cryptographic security boundary. The key is held server-side by the Next.js proxy (never shipped to the browser bundle) and required on all non-`/health` routes. When unset, auth is disabled and the API logs a warning at startup.
+## 7. Troubleshooting
 
-## 6. Escalation
+The incident table (symptom, cause, fix) is in [`RUNBOOK.md`](RUNBOOK.md#common-failures). Sentry-specific issues:
 
-| Issue Type | First Response | Escalate To |
-|------------|---------------|-------------|
-| Sentry ingest errors | Check token/scopes, API logs | Development team |
-| Container won't start | Check Docker logs, port conflicts | Infrastructure team |
-| Model produces NaN/Inf | Check data volume, optimizer | Data science team |
-| Security incident | Take API offline, rotate credentials | Security team |
-| UI rendering issues | Check browser console, API connectivity | Frontend team |
+### "No failure events found"
+1. Token missing, expired, or lacking `event:read` (check `/health` → `sentry_token_configured`, then token scopes in Sentry).
+2. Wrong org/project slug (case-sensitive). List slugs with the project picker or `GET /ingest/sentry/projects?org=<org>`.
+3. No events in the look-back window: widen the window.
 
-## 7. Backup & Recovery
+### 502 on `/ingest/sentry`
+Sentry returned an error (401, 404, 429 or network failure). Transient errors (429, 5xx) are retried with backoff before failing. The specific reason is in the API log (`grep -i sentry`); it is not echoed to clients. `rm_ingest_failures_total` increments.
 
-- **Log archives**: Stored in `output/logs/`. Back up this directory.
-- **Configuration**: Back up `fault_categories.conf` and `web/api/settings.json`.
-- **Recovery**: Restore files to the same paths and restart containers.
+### Sentry rate limiting
+"All projects" across a large org can hit Sentry's API limits. Narrow the window or analyse one project at a time. The connector caps 5000 events per project and 50 projects per aggregation.
 
-## 8. Capacity Planning
+### Model fails to converge
+Fewer than 3 events, or identical timestamps. Use a busier project or a wider window.
 
-- The API is CPU-bound (scipy MLE fits + matplotlib rendering).
-- Estimated: 2-5 seconds per analysis on ~1000 events.
-- Sentry pulls are the bottleneck for large orgs — respect Sentry's rate limits.
-- Recommend 1 vCPU per 5 concurrent analysis requests.
-- Memory: ~256MB baseline, peaks at ~512MB during rendering.
+### UI shows "Failed to pull data from Sentry"
+- `SENTRY_AUTH_TOKEN` must be set on the **api** service, not the UI.
+- The UI reaches the API through `API_URL` (compose sets `http://api:8000`). There is no `NEXT_PUBLIC_API_URL`.
+- Check `docker compose logs ui` for proxy errors and `docker compose logs api` for the matching request ID.
+
+## 8. Capacity planning
+
+All figures are **estimates** from development hardware, not load-tested guarantees. Measure in your environment with `rm_analysis_duration_seconds_*`.
+
+| Item | Estimate |
+|------|----------|
+| Analysis time, ~1,000 events | 2–5 s CPU |
+| Analysis time, 5,000 events (single-project cap) | 10–30 s |
+| API memory | ~250 MB idle, ~500–800 MB peak during fitting/rendering (compose limit 1 GB) |
+| UI memory | ~100–200 MB (compose limit 512 MB) |
+| Concurrency | ~1 concurrent analysis per vCPU (compose limit 2 vCPU) |
+| Disk per analysis | ~0.1–1 MB (archive + persisted analysis + plot) |
+| Disk at 90-day retention, 20 analyses/day | roughly 0.2–2 GB |
+
+Sentry pull time is usually the dominant factor for "all projects" runs.
+
+## 9. Environment variables
+
+The authoritative list with defaults is in [`README.md`](README.md#configuration) and [`.env.example`](.env.example).
+
+## 10. Escalation
+
+| Issue | First response | Escalate to |
+|-------|----------------|-------------|
+| Sentry ingest errors | Token/scopes, API logs | trustaldo@gmail.com |
+| Container unhealthy / won't start | `docker compose ps`, logs, runbook table | Marwa Trust Mutemasango |
+| Model produces NaN/Inf | Data volume, model inputs | trustaldo@gmail.com |
+| Security incident | Stop the stack, rotate API key / UI password / Sentry token | trustaldo@gmail.com |

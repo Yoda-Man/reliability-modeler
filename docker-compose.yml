@@ -1,31 +1,86 @@
+# Reliability Modeler — production-style compose file.
+#
+#   cp .env.example .env    # then set RELIABILITY_API_KEY and UI_PASSWORD
+#   docker compose up -d
+#   open http://localhost:3000
+#
+# Only the UI is published to the host. The API is reachable solely on the
+# internal compose network (the UI's server-side proxy talks to http://api:8000).
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
   api:
-    image: trustaldo/reliability-modeler-api:latest
-    ports:
-      - "8000:8000"
+    <<: *hardening
+    image: ${DOCKERHUB_NAMESPACE:-trustaldo}/reliability-modeler-api:${IMAGE_TAG:-latest}
+    expose:
+      - "8000"
     environment:
-      - PYTHONUNBUFFERED=1
-      - ALLOWED_ORIGINS=http://localhost:3000
-      # Shared secret for API auth. Set the same value in the ui service.
-      - RELIABILITY_API_KEY=${RELIABILITY_API_KEY:-}
-      # Sentry integration
-      - SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN:-}
-      - SENTRY_BASE_URL=${SENTRY_BASE_URL:-https://sentry.io/api/0/}
+      RELIABILITY_API_KEY: ${RELIABILITY_API_KEY:?set RELIABILITY_API_KEY in .env}
+      SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN:-}
+      SENTRY_BASE_URL: ${SENTRY_BASE_URL:-https://sentry.io/api/0/}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      ANALYSIS_TIMEOUT_SECONDS: ${ANALYSIS_TIMEOUT_SECONDS:-120}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      # CONFIG_DIR, OUTPUT_DIR and DEFAULT_CONFIG_PATH are set by the image.
     volumes:
-      # Persist log archives, analyses, and plots across restarts
       - output_data:/app/output
+      - config_data:/app/config
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+    logging: *default-logging
 
   ui:
-    image: trustaldo/reliability-modeler-ui:latest
+    <<: *hardening
+    image: ${DOCKERHUB_NAMESPACE:-trustaldo}/reliability-modeler-ui:${IMAGE_TAG:-latest}
     ports:
-      - "3000:3000"
+      - "${UI_PORT:-3000}:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
-      # Server-side API URL used by the Next.js proxy (not exposed to the browser)
-      - API_URL=http://api:8000
-      # Must match the API's RELIABILITY_API_KEY
-      - RELIABILITY_API_KEY=${RELIABILITY_API_KEY:-}
+      # Server-side only: the Next.js proxy forwards /api/* here and injects the key.
+      API_URL: http://api:8000
+      RELIABILITY_API_KEY: ${RELIABILITY_API_KEY:?set RELIABILITY_API_KEY in .env}
+      UI_USERNAME: ${UI_USERNAME:-admin}
+      UI_PASSWORD: ${UI_PASSWORD:?set UI_PASSWORD in .env}
+      PROXY_TIMEOUT_MS: ${PROXY_TIMEOUT_MS:-130000}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+    logging: *default-logging
 
 volumes:
   output_data:
+  config_data:

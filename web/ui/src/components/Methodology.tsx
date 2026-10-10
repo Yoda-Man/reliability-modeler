@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { BookOpen, Target, Shield, Info } from 'lucide-react';
+import { Target, Shield, Info } from 'lucide-react';
 
 export default function MethodologyView() {
     return (
@@ -33,7 +33,7 @@ export default function MethodologyView() {
                     <p className="text-sm text-slate-400 leading-relaxed">
                         Also known as the Logarithmic Poisson Execution Time model. It assumes that earlier
                         faults contribute more to the failure rate than later ones, often providing a
-                        more realistic "pessimistic" bound.
+                        more realistic &quot;pessimistic&quot; bound.
                     </p>
                 </div>
             </div>

@@ -5,7 +5,67 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.8.0] - 2025-08-17
+## [2.9.0] - 2026-10-10
+
+Production-readiness release. **Contains breaking changes**; read "Upgrade notes" and RUNBOOK.md section 2 before upgrading.
+
+### Breaking
+- **`RELIABILITY_API_KEY` is mandatory.** The API refuses to start without it (dev-only escape hatch: `ALLOW_INSECURE_NO_AUTH=true`). Every route except `/health` and `/health/live` requires the key, including `/docs`, `/redoc`, `/openapi.json` and `/metrics`.
+- **`UI_PASSWORD` is mandatory.** The UI enforces HTTP Basic auth on every route except `/healthz`; without a password it answers 503 "UI_PASSWORD not configured". `docker compose` refuses to start if either variable is missing.
+- **API port 8000 is no longer published** to the host. All access goes through the UI proxy on port 3000 (or from inside the compose network).
+- **Analysis ID format** is now `AN-YYYYMMDD-HHMMSS-<6 hex>` (UTC, unique). Old IDs are still accepted.
+
+### Added
+- UI login (Basic auth, constant-time compare, `UI_USERNAME` default `admin`) and `/healthz` liveness route.
+- Persistent `config_data` volume at `/app/config` for `fault_categories.conf` and `settings.json`, seeded from the bundled default (`/app/defaults/fault_categories.conf`) on first start. New `CONFIG_DIR`, `OUTPUT_DIR`, `DEFAULT_CONFIG_PATH` settings.
+- Deep health check: `/health` reports `checks` (output writable, config readable, Sentry token configured) with `ok` / `degraded` / `error` (503); `/health/live` for container health checks.
+- Prometheus `/metrics`: `rm_http_requests_total`, `rm_analyses_total`, `rm_analysis_duration_seconds_sum/_count`, `rm_ingest_failures_total`.
+- Real JSON logging (`ts`, `level`, `logger`, `msg`, `request_id`).
+- Configurable retention: `RETENTION_DAYS` (default 90; startup + daily prune; 0 disables).
+- Request body limit `MAX_BODY_BYTES` (default 1 MiB) on all POST routes; stricter input validation.
+- UI: live System Status badge, visible error states with HTTP status and retry, React error boundaries.
+- UI proxy: forwards/generates `X-Request-ID`, sets `X-Forwarded-For`, GET/POST allowlist, 1 MiB body limit, `PROXY_TIMEOUT_MS`, binary-safe bodies, JSON error logging.
+- Tests: API tests with FastAPI `TestClient`, UI tests with vitest; coverage floor of 75% in CI.
+- `RUNBOOK.md` (deploy, upgrade, rollback, secret rotation, backup/restore, failure table, release procedure); `scripts/backup.sh`, `scripts/restore.sh`, `scripts/smoke-test.sh`.
+- `release.yml` workflow: multi-arch (`linux/amd64`, `linux/arm64`) build and push to Docker Hub on `v*` tags or manual dispatch.
+
+### Changed
+- Single version source: `modeler/__init__.py` (`2.9.0`), used by the API, Makefile and release workflow.
+- Analysis and GraphQL execution run off the event loop, so timeouts are enforced and `/health` stays responsive; plotting uses the matplotlib object API (no global pyplot state).
+- All error responses use `{"detail": "..."}`; UI parses `detail` (then `error`).
+- Sentry connector retries transient failures (429/5xx) with backoff.
+- API image: `python:3.13-slim` pinned by digest, multi-stage build (no compiler in the runtime image), non-root, health check on `/health/live`, all API modules copied.
+- Compose hardening: `IMAGE_TAG` / `DOCKERHUB_NAMESPACE`, `restart: unless-stopped`, health-based `depends_on`, CPU/memory limits, json-file log rotation (10 MB x 5), `no-new-privileges`, dropped capabilities, configurable `ALLOWED_ORIGINS`.
+- Root `.dockerignore` keeps `.env`, `.git`, output and tool directories out of the build context.
+- Makefile rewritten: `build`, `test`, `smoke`, multi-arch `push` (`:VERSION` + `:latest`), `up`/`down`/`logs`, `backup`/`restore`.
+- CI overhaul: Python 3.13 (matches the image), coverage gate, integration tests against an authenticated API, UI lint/typecheck/test/build, `npm audit` and `pip-audit`, Docker build + smoke test, current action versions.
+- Documentation rewritten: README, SUPPORT, USER_MANUAL, `.env.example`.
+
+### Fixed
+- Rate limiter: `X-Forwarded-For` is honoured only for requests authenticated with the API key (the UI proxy), so clients can no longer spoof their IP to evade limits.
+- Cascade-chain extraction bug in the graph engine.
+- Analysis ID collisions when two analyses started in the same second.
+
+### Removed
+- `Reference_Release/` (old Windows CLI build and sample CSV input). It remains available in git history.
+
+### Upgrade notes
+- Add `RELIABILITY_API_KEY` and `UI_PASSWORD` to `.env` (see `.env.example`), replace `docker-compose.yml`, then `docker compose up -d`.
+- A customised taxonomy from 2.8.x lived inside the container; export it before upgrading and copy it into the new config volume (RUNBOOK.md section 2).
+- Anything that called `http://<host>:8000` directly must use the UI proxy or the internal network.
+
+## [2.8.1] - 2026-10-10
+
+### Fixed
+- **Sentry ingestion** — `_fetch_project_events` referenced an undefined `base` variable (NameError on every ingest since 2.8.0).
+- **API image** — Dockerfile now copies `graphql_schema.py`; images since 2.7.1 crashed on startup.
+- **UI build** — regenerated `package-lock.json` (was out of sync with package.json, `npm ci` failed); fixed two TypeScript errors from the recharts upgrade.
+- **UI healthcheck** — probes `127.0.0.1` instead of `localhost` (resolved to IPv6, container reported unhealthy).
+
+### Security
+- Next.js 16.3.0 → 16.3.8 (critical advisory: RCE/SSRF in image optimization); `npm audit` now clean.
+
+## [2.8.0] - 2026-08-17
 
 ### Security fixes (from full audit)
 - **Authentication fixed** — removed the client-side `NEXT_PUBLIC_API_KEY` (was
@@ -38,8 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - 4 new security tests (slug validation, path traversal rejection, introspection regex).
 - 39/39 unit tests pass.
+- *Correction (2026-10-10):* the 39 passing tests did not cover `_fetch_project_events` or the Docker image. 2.8.0 shipped with a `NameError` on every Sentry ingest and an API image that crashed on startup; both were fixed in 2.8.1.
 
-## [2.7.2] - 2025-08-08
+## [2.7.2] - 2026-08-17
 
 ### Added — Cross-analysis GraphQL query
 - `keystoneCategoriesAcross(limit)` — aggregates keystone categories across
@@ -48,7 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 1 new unit test covering the cross-analysis aggregation.
 - README: example query.
 
-## [2.7.1] - 2025-08-08
+## [2.7.1] - 2026-08-17
 
 ### Added — GraphQL persistence
 - Graph data is now persisted to `output/analyses/{id}.json`, so GraphQL can query
@@ -61,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Numpy bool serialization** — `is_keystone`/`is_bridge` were `np.bool_` (not
   Python `bool`), which broke GraphQL Boolean serialization. Cast to `bool()`.
 
-## [2.7.0] - 2025-08-08
+## [2.7.0] - 2026-08-17
 
 ### Major — Sentry-Only Simplification
 - **Removed CSV upload** — deleted `/analyze` (file upload) and `/sample-data` endpoints.
@@ -85,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `reliability_modeler.py`, `modeler/export.py`, `run_analysis.bat`, `build_release.bat`,
   `web/api/sample_data.csv`, `input/error_log.csv`, ad-hoc test scripts, and stale logs.
 
-## [2.6.0] - 2025-08-08
+## [2.6.0] - 2026-08-17
 
 ### Added — Multi-Project Sentry
 - **`list_sentry_projects()`** — lists all projects in a Sentry org
@@ -106,7 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now consistent.
 - Version bumped to 2.6.0.
 
-## [2.5.0] - 2025-08-08
+## [2.5.0] - 2026-08-17
 
 ### Added — Sentry Integration
 - **`modeler/sentry.py`** — connector that pulls failure events from the Sentry
@@ -132,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pagination capped at 50 pages (5000 events) with cursor-based Link-header parsing.
 - Uses only stdlib (`urllib`) — no new runtime dependency.
 
-## [2.4.0] - 2025-08-08
+## [2.4.0] - 2026-08-09
 
 ### Error Resilience
 - **Request timeout** on `/analyze` — `asyncio.wait_for` with configurable
@@ -164,7 +225,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SUPPORT.md: documented `ANALYSIS_TIMEOUT_SECONDS` and `NEXT_PUBLIC_API_KEY`
   env vars, log pruning schedule.
 
-## [2.3.2] - 2025-08-08
+## [2.3.4] - 2026-08-08
+
+### Security
+- CORS `allow_headers` includes `X-API-Key` and `allow_methods` includes `OPTIONS` (browser auth was blocked).
+- `analysis_id` HTML-escaped in the `/report/{id}/html` template.
+- API key comparison uses `secrets.compare_digest()` (constant time).
+- Rate-limit store prunes only expired entries instead of clearing everything.
+- `/graphql` enforces a 256 KB body limit.
+- Next.js security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`.
+
+### Added
+- Docker `HEALTHCHECK` for the API (`/health`) and UI images.
+
+### Changed
+- Version strings in the API and health endpoint corrected.
+
+## [2.3.3] - 2026-08-08
+
+### Changed
+- UI dependencies bumped: next 16.1.6 -> 16.3.0, react/react-dom 19.2.3 -> 19.2.8, recharts ^3.10.1, tailwind-merge ^3.6.0, eslint-config-next 16.3.0, tailwindcss ^4.3.3 and matching `@types`.
+- Python dependencies verified at latest; held back lucide-react 1.x, eslint 10 and TypeScript 7 (breaking changes).
+
+## [2.3.2] - 2026-08-08
+
+> Note: this release mainly moved the UI image to Node 22 and wrote up the changelog. Most security and fix items below were delivered in 2.3.1 and are listed here as originally documented.
 
 ### Security
 - **API key authentication** — `X-API-Key` header checked against `RELIABILITY_API_KEY`
@@ -199,7 +284,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - 18/18 pass (3 new `fit_model` tests).
 
-## [2.3.0] - 2025-08-08
+## [2.3.1] - 2026-08-08
+
+### Security (audit fixes)
+- `/report/{id}/html` path-traversal fix and HTML escaping of filename/date (stored XSS).
+- API key middleware (`X-API-Key` vs `RELIABILITY_API_KEY`; GET and `/health` exempt at the time).
+- Rate-limit store pruning above 1000 entries; CORS origin whitespace stripping.
+- GraphQL introspection disabled.
+
+### Fixed
+- API image base corrected from `python:3.14-slim` to `python:3.13-slim`.
+- GraphQL import works in both package and flat Docker layouts.
+- `/logs` limit/offset clamped; `settings.json` added to `.gitignore`; consistent AIC formula; plot errors log tracebacks.
+
+### Tests
+- 3 new `fit_model` tests (18 total).
+
+## [2.3.0] - 2026-08-08
 
 ### Added
 - **Trend Comparison** (`GET /trends` + TrendsView): cross-run MTBF and failure rate
@@ -215,7 +316,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Dashboard now includes the Failure Heatmap panel below the Risk Bubble chart.
 
-## [2.2.0] - 2025-08-08
+## [2.2.0] - 2026-08-08
 
 ### Added
 - **Interactive Recharts dashboard** — category bar chart, MTBF trend area chart,
@@ -235,7 +336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recent failures list increased to 50 items with improved formatting.
 - PNG plots retained as high-quality fallback for reliability growth and intensity.
 
-## [2.1.0] - 2025-08-08
+## [2.1.0] - 2026-08-08
 
 ### Added
 - **NetworkX graph analytics engine** (`modeler/graphs.py`): co-occurrence graph,
@@ -247,7 +348,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   categories, cascade chains, communities, and graph health metrics.
 - 9 new unit tests for graph module (15/15 pass total).
 
-## [2.0.2] - 2025-08-08
+## [2.0.3] - 2026-08-08
+
+### Added
+- `GET /logs` pagination (`{"total", "logs"}` with limit/offset) and `POST /logs/prune` (default 90 days); Logs view page controls.
+- CI workflow (`.github/workflows/test.yml`): unit tests, API integration tests, Docker build of both images.
+- SUPPORT.md section on config persistence (ephemeral storage risk, Kubernetes PVC example); startup warning when config is on temporary paths.
+
+### Fixed
+- Per-category "remaining failures" extrapolation now uses a practical forecast horizon instead of the unbounded asymptote (e.g. "117 more" instead of "76828 more").
+
+### Documentation
+- README notice that the application is for internal networks only.
+
+## [2.0.2] - 2026-08-08
 
 ### Changed
 - **Python 3.14 support** — upgraded all dependencies and Docker base image to Python 3.14.
@@ -260,7 +374,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - pytest 8.3.4 → 9.1.1
   - All unit tests (6/6) and full CLI pipeline pass on Python 3.14.
 
-## [2.0.1] - 2025-08-08
+## [2.0.1] - 2026-08-08
 
 ### Security
 - **Fixed path traversal** via uploaded filename — now uses UUID-based filenames.

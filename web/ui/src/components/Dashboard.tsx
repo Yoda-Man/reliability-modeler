@@ -1,51 +1,21 @@
 'use client';
+/* eslint-disable @next/next/no-img-element -- plots are inline base64 PNGs returned by the API */
 
 import React, { useState, useMemo } from 'react';
 import {
-    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-    BarChart, Bar, AreaChart, Area, PieChart, Pie, Cell, ScatterChart, Scatter,
+    XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+    BarChart, Bar, Area, Cell, ScatterChart, Scatter,
     ZAxis, ComposedChart
 } from 'recharts';
 import {
-    Activity, TrendingDown, AlertTriangle, CheckCircle, Download,
+    Activity, TrendingDown, AlertTriangle, CheckCircle,
     Maximize2, HelpCircle, Clock, Target, Zap, Network, ChevronDown,
     ChevronUp, FileText, CalendarClock
 } from 'lucide-react';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-interface GraphReport {
-    keystone_categories: Array<{ name: string; pagerank: number; is_bridge: boolean }>;
-    top_cascade: { chain: string; confidence: number } | null;
-    num_communities: number;
-    graph_density: number;
-    graph_json?: {
-        nodes: Array<{ id: string; pagerank: number; degree: number; community: number }>;
-        edges: Array<{ source: string; target: string; weight: number; jaccard: number }>;
-        cascade_edges: Array<{ source: string; target: string; weight: number; confidence: number; avg_latency: number }>;
-    };
-}
-
-interface AnalysisResults {
-    id: string;
-    summary: {
-        total_failures: number;
-        duration_hours: number;
-        start_time: string;
-    };
-    models: Array<{
-        id: string;
-        name: string;
-        aic: number;
-        total_expected_failures: number | null;
-        parameters: Record<string, number>;
-    }>;
-    plots: Record<string, string>;
-    categorized_failures: Array<any>;
-    graph_insights?: string[];
-    graph_report?: GraphReport | null;
-    projects?: Record<string, number>;
-}
+import type { AnalysisResults, CategorizedFailure, GraphReport } from '@/lib/types';
 
 // ── Color Palette ───────────────────────────────────────────────────────────
 
@@ -57,7 +27,7 @@ const CATEGORY_COLORS = [
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function buildCategoryCounts(categorized: any[]) {
+function buildCategoryCounts(categorized: CategorizedFailure[]) {
     const counts: Record<string, number> = {};
     for (const row of categorized) {
         const cats = (row[2] || '').split(',').map((c: string) => c.trim()).filter(Boolean);
@@ -70,24 +40,7 @@ function buildCategoryCounts(categorized: any[]) {
         .sort((a, b) => b.value - a.value);
 }
 
-function buildTimeSeries(categorized: any[]) {
-    // Group failures by hour bucket
-    const buckets: Record<number, Record<string, number>> = {};
-    const allCats = new Set<string>();
-    for (const row of categorized) {
-        const hour = Math.floor(parseFloat(row[1]) || 0);
-        const cats = (row[2] || '').split(',').map((c: string) => c.trim()).filter(Boolean);
-        if (!buckets[hour]) buckets[hour] = {};
-        for (const c of cats) {
-            allCats.add(c);
-            buckets[hour][c] = (buckets[hour][c] || 0) + 1;
-        }
-    }
-    const sortedHours = Object.keys(buckets).map(Number).sort((a, b) => a - b);
-    return sortedHours.map(h => ({ hour: h, ...buckets[h] }));
-}
-
-function buildHeatmapData(categorized: any[]) {
+function buildHeatmapData(categorized: CategorizedFailure[]) {
     // Build hour-of-day × day-of-week heatmap from ISO timestamps in row[0]
     const grid: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
     let total = 0;
@@ -108,28 +61,26 @@ function buildHeatmapData(categorized: any[]) {
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOUR_LABELS = Array.from({ length: 24 }, (_, i) => `${i}h`);
 
-function computeMTBFOverTime(categorized: any[], windowSize: number = 10) {
+function computeMTBFOverTime(categorized: CategorizedFailure[], windowSize: number = 10) {
     const points: Array<{ hour: number; mtbf: number; failures: number }> = [];
     for (let i = windowSize; i < categorized.length; i += Math.max(1, Math.floor(windowSize / 2))) {
         const slice = categorized.slice(Math.max(0, i - windowSize), i);
         if (slice.length < 2) continue;
-        const times = slice.map((r: any) => parseFloat(r[1])).sort((a: number, b: number) => a - b);
+        const times = slice.map(r => Number(r[1])).sort((a, b) => a - b);
         let totalGap = 0;
         for (let j = 1; j < times.length; j++) totalGap += times[j] - times[j - 1];
         const mtbf = totalGap / (times.length - 1);
-        points.push({ hour: parseFloat(categorized[i][1]), mtbf: parseFloat(mtbf.toFixed(2)), failures: i });
+        points.push({ hour: Number(categorized[i][1]), mtbf: parseFloat(mtbf.toFixed(2)), failures: i });
     }
     return points;
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────────
 
-function KPICard({ title, value, icon, description, tooltip, trend }: {
+function KPICard({ title, value, icon, description, tooltip }: {
     title: string; value: string; icon: React.ReactNode; description: string; tooltip: string;
-    trend?: 'up' | 'down' | 'stable';
 }) {
     const [showTooltip, setShowTooltip] = useState(false);
-    const trendColor = trend === 'up' ? 'text-emerald-400' : trend === 'down' ? 'text-rose-400' : 'text-slate-400';
     return (
         <div className="p-5 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl hover:border-slate-700 transition-all group relative">
             <div className="flex items-center justify-between mb-3">
@@ -221,7 +172,7 @@ function GraphInsightCard({ graphReport }: { graphReport: GraphReport | null | u
     );
 }
 
-function RiskBubbleChart({ categorized, graphReport }: { categorized: any[]; graphReport?: GraphReport | null }) {
+function RiskBubbleChart({ categorized, graphReport }: { categorized: CategorizedFailure[]; graphReport?: GraphReport | null }) {
     const data = useMemo(() => {
         const counts = buildCategoryCounts(categorized);
         const pagerankMap: Record<string, number> = {};
@@ -258,7 +209,7 @@ function RiskBubbleChart({ categorized, graphReport }: { categorized: any[]; gra
                         <ZAxis type="number" dataKey="impact" range={[30, 200]} />
                         <Tooltip cursor={{ strokeDasharray: '3 3' }}
                             contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '11px' }}
-                            formatter={(value: any, name: string) => [value, name === 'centrality' ? 'Centrality' : name === 'failures' ? 'Failures' : name]} />
+                            formatter={(value, name) => [value, name === 'centrality' ? 'Centrality' : name === 'failures' ? 'Failures' : name]} />
                         <Scatter data={data} fill="#6366f1">
                             {data.map((entry, index) => (
                                 <Cell key={entry.name} fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]} fillOpacity={0.7} />
@@ -279,7 +230,7 @@ function RiskBubbleChart({ categorized, graphReport }: { categorized: any[]; gra
     );
 }
 
-function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: any[]; windowSize?: number }) {
+function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: CategorizedFailure[]; windowSize?: number }) {
     const data = useMemo(() => computeMTBFOverTime(categorized, windowSize), [categorized, windowSize]);
     if (data.length < 2) {
         return (
@@ -310,7 +261,7 @@ function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: any[]; 
     );
 }
 
-function FailureHeatmap({ categorized }: { categorized: any[] }) {
+function FailureHeatmap({ categorized }: { categorized: CategorizedFailure[] }) {
     const { grid, maxVal, total } = useMemo(() => buildHeatmapData(categorized), [categorized]);
     if (total === 0) {
         return (
@@ -394,7 +345,6 @@ export default function Dashboard({
     const [showPNGPlots, setShowPNGPlots] = useState(true);
     const bestModel = data.models.reduce((prev, curr) => prev.aic < curr.aic ? prev : curr);
     const categoryData = useMemo(() => buildCategoryCounts(data.categorized_failures), [data.categorized_failures]);
-    const timeSeriesData = useMemo(() => buildTimeSeries(data.categorized_failures), [data.categorized_failures]);
     const mtbf = data.summary.duration_hours / (data.summary.total_failures || 1);
     const residuals = bestModel.total_expected_failures
         ? Math.max(0, Math.round(bestModel.total_expected_failures - data.summary.total_failures))
@@ -460,7 +410,7 @@ export default function Dashboard({
                     </h3>
                     <div className="space-y-2">
                         {Object.entries(data.projects).slice(0, 12).map(([name, count], i) => {
-                            const max = Math.max(...Object.values(data.projects)) || 1;
+                            const max = Math.max(...Object.values(data.projects ?? {})) || 1;
                             const pct = (count / max) * 100;
                             return (
                                 <div key={name} className="flex items-center space-x-3">
@@ -581,7 +531,7 @@ export default function Dashboard({
                     <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
                         {data.categorized_failures.slice(0, 50).map((fail, i) => (
                             <div key={i} className="flex items-center p-2.5 rounded-lg bg-slate-800/20 border border-slate-700/20 text-xs hover:bg-slate-800/40 transition-colors">
-                                <span className="text-slate-500 mr-3 font-mono text-[10px] w-12">{parseFloat(fail[1]).toFixed(2)}h</span>
+                                <span className="text-slate-500 mr-3 font-mono text-[10px] w-12">{Number(fail[1]).toFixed(2)}h</span>
                                 <span className="px-2 py-0.5 rounded-full bg-slate-700/50 text-slate-400 mr-3 font-medium truncate max-w-[90px] text-[10px]">{fail[2]}</span>
                                 <span className="text-slate-300 truncate flex-1 text-[11px]">{fail[3]}</span>
                             </div>

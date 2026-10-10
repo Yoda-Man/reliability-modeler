@@ -1,73 +1,111 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Settings, Sliders, Tag, FileCode, Save, Loader2, CheckCircle2, FlaskConical, Target } from 'lucide-react';
-import { apiFetch } from '@/app/apiClient';
+import React, { useState, useEffect, useRef } from 'react';
+import { Sliders, Tag, FileCode, Save, Loader2, CheckCircle2, FlaskConical, Target, AlertCircle } from 'lucide-react';
+import { apiJson, formatError } from '@/lib/api';
+import type { ConfigResponse, EngineSettings } from '@/lib/types';
+import ErrorState from './ErrorState';
 
-interface ConfigSettings {
-    multi_label: boolean;
+interface ConfigFormState extends EngineSettings {
     taxonomy_content: string;
-    optimization_method: string;
-    tolerance: number;
 }
 
+const DEFAULTS: ConfigFormState = {
+    multi_label: false,
+    taxonomy_content: '',
+    optimization_method: 'L-BFGS-B',
+    tolerance: 1e-6,
+};
+
+type SaveStatus = { kind: 'idle' } | { kind: 'success' } | { kind: 'error'; message: string };
+
 export default function ConfigView() {
-    const [settings, setSettings] = useState<ConfigSettings>({
-        multi_label: false,
-        taxonomy_content: '',
-        optimization_method: 'L-BFGS-B',
-        tolerance: 1e-10
-    });
+    const [settings, setSettings] = useState<ConfigFormState>(DEFAULTS);
     const [isLoading, setIsLoading] = useState(true);
+    const [loadError, setLoadError] = useState<unknown>(null);
     const [isSaving, setIsSaving] = useState(false);
-    const [saveSuccess, setSaveSuccess] = useState(false);
+    const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: 'idle' });
+    const successTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const [reloadKey, setReloadKey] = useState(0);
 
     useEffect(() => {
-        fetchConfig();
+        let cancelled = false;
+        apiJson<ConfigResponse>('/config', {}, 'Failed to load configuration')
+            .then(data => {
+                if (cancelled) return;
+                setSettings({
+                    multi_label: data.settings?.multi_label ?? DEFAULTS.multi_label,
+                    optimization_method: data.settings?.optimization_method ?? DEFAULTS.optimization_method,
+                    tolerance: data.settings?.tolerance ?? DEFAULTS.tolerance,
+                    taxonomy_content: data.content ?? '',
+                });
+                setLoadError(null);
+            })
+            .catch((err: unknown) => {
+                if (!cancelled) setLoadError(err);
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [reloadKey]);
+
+    useEffect(() => () => {
+        if (successTimer.current) clearTimeout(successTimer.current);
     }, []);
 
-    const fetchConfig = async () => {
-        try {
-            const response = await apiFetch('/config');
-            if (response.ok) {
-                const data = await response.json();
-                setSettings(data);
-            }
-        } catch (error) {
-            console.error('Failed to fetch config:', error);
-        } finally {
-            setIsLoading(false);
-        }
+    const retryLoad = () => {
+        setIsLoading(true);
+        setReloadKey(k => k + 1);
     };
 
     const handleSave = async () => {
         setIsSaving(true);
-        setSaveSuccess(false);
+        setSaveStatus({ kind: 'idle' });
+        if (successTimer.current) clearTimeout(successTimer.current);
         try {
-            const response = await apiFetch('/config', {
+            const payload: ConfigResponse = {
+                content: settings.taxonomy_content,
+                settings: {
+                    multi_label: settings.multi_label,
+                    optimization_method: settings.optimization_method,
+                    tolerance: settings.tolerance,
+                },
+            };
+            await apiJson<{ status: string }>('/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(settings),
-            });
-            if (response.ok) {
-                setSaveSuccess(true);
-                setTimeout(() => setSaveSuccess(false), 3000);
-            }
-        } catch (error) {
-            console.error('Failed to save config:', error);
-            alert('Failed to save configuration.');
+                body: JSON.stringify(payload),
+            }, 'Failed to save configuration');
+            setSaveStatus({ kind: 'success' });
+            successTimer.current = setTimeout(() => setSaveStatus({ kind: 'idle' }), 3000);
+        } catch (err) {
+            setSaveStatus({ kind: 'error', message: formatError(err) });
         } finally {
             setIsSaving(false);
         }
     };
 
     const toggleMultiLabel = () => setSettings(s => ({ ...s, multi_label: !s.multi_label }));
+    const saveSuccess = saveStatus.kind === 'success';
 
     if (isLoading) {
         return (
             <div className="flex flex-col items-center justify-center h-64 space-y-4">
                 <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
                 <p className="text-slate-400">Loading configurations...</p>
+            </div>
+        );
+    }
+
+    if (loadError) {
+        return (
+            <div className="max-w-4xl animate-in fade-in duration-500 space-y-6">
+                <h2 className="text-3xl font-bold text-white tracking-tight">System Configurations</h2>
+                <ErrorState title="Could not load configuration" error={loadError} onRetry={retryLoad} />
             </div>
         );
     }
@@ -80,7 +118,7 @@ export default function ConfigView() {
                     <p className="text-slate-400 text-sm">Fine-tune the mathematical core and classification engine.</p>
                 </div>
                 <button
-                    onClick={handleSave}
+                    onClick={() => void handleSave()}
                     disabled={isSaving}
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -88,6 +126,19 @@ export default function ConfigView() {
                     <span>{isSaving ? 'Saving...' : saveSuccess ? 'Saved' : 'Save Changes'}</span>
                 </button>
             </div>
+
+            {saveStatus.kind === 'error' && (
+                <div role="alert" className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-start space-x-3">
+                    <AlertCircle className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" />
+                    <p className="text-sm text-rose-300">{saveStatus.message}</p>
+                </div>
+            )}
+            {saveSuccess && (
+                <div role="status" className="mb-6 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start space-x-3">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+                    <p className="text-sm text-emerald-300">Configuration saved.</p>
+                </div>
+            )}
 
             <div className="space-y-8">
                 <section>
@@ -167,10 +218,13 @@ export default function ConfigView() {
                                 type="number"
                                 step="1e-12"
                                 value={settings.tolerance}
-                                onChange={(e) => setSettings({ ...settings, tolerance: parseFloat(e.target.value) })}
+                                onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    if (Number.isFinite(v)) setSettings({ ...settings, tolerance: v });
+                                }}
                                 className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-300 focus:outline-none focus:border-blue-500 transition-colors"
                             />
-                            <p className="text-[10px] text-slate-500">The precision threshold for convergence (Default: 1e-10).</p>
+                            <p className="text-[10px] text-slate-500">The precision threshold for convergence (Default: 1e-6).</p>
                         </div>
                     </div>
                 </section>

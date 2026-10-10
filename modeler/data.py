@@ -1,10 +1,9 @@
 """
 Fault categorization — shared helpers used by all ingestion sources (Sentry).
 
-This module no longer parses CSV files. Data ingestion happens exclusively
-through the Sentry connector (`modeler/sentry.py`), which calls
-`categorize_description()` and `load_fault_categories()` to assign fault
-categories to incoming failure events.
+Data ingestion happens exclusively through the Sentry connector
+(`modeler/sentry.py`), which calls `load_fault_categories()` and
+`categorize_description()` to assign fault categories to incoming events.
 """
 
 from pathlib import Path
@@ -12,35 +11,55 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Single label used for events that match no taxonomy rule.
+UNCATEGORIZED = "Uncategorized"
+
+
+class TaxonomyError(Exception):
+    """Raised when the fault taxonomy file is missing, unreadable or empty."""
+
+
+def parse_fault_categories(text: str):
+    """Parse taxonomy text into a list of (category_name, {keywords}) tuples.
+
+    Format (one rule per line; '#' starts a comment line):
+        Category [keyword1, keyword2, keyword3]
+    """
+    categories = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '[' not in line:
+            continue
+        cat_name, rest = line.split('[', 1)
+        cat_name = cat_name.strip()
+        keywords = {k.strip().lower() for k in rest.rstrip(']').split(',') if k.strip()}
+        if cat_name and keywords:
+            categories.append((cat_name, keywords))
+    return categories
+
 
 def load_fault_categories(config_path: Path):
     """Load the fault taxonomy from a config file.
 
-    Format (one rule per line):
-        Category [keyword1, keyword2, keyword3]
+    Returns a non-empty list of (category_name, {keywords}) tuples.
 
-    Returns a list of (category_name, {keywords}) tuples, or None on error.
+    Raises:
+        TaxonomyError: if the file is missing, unreadable, or defines no
+            categories. Callers must surface this instead of silently
+            categorising every event as Uncategorized.
     """
+    config_path = Path(config_path)
     if not config_path.is_file():
-        logger.warning(f"Config file not found: {config_path}")
-        return None
-    categories = []
+        raise TaxonomyError(f"Taxonomy file not found: {config_path}")
     try:
-        with open(config_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#') or '[' not in line:
-                    continue
-                parts = line.split('[', 1)
-                cat_name = parts[0].strip()
-                keywords = [k.strip().lower() for k in parts[1].rstrip(']').split(',') if k.strip()]
-                if keywords:
-                    categories.append((cat_name, set(keywords)))
-        logger.info(f"Loaded {len(categories)} fault categories from {config_path}")
-        return categories
-    except Exception as e:
-        logger.error(f"Error loading fault categories: {e}")
-        return None
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise TaxonomyError(f"Taxonomy file {config_path} is unreadable: {e}") from e
+    categories = parse_fault_categories(text)
+    if not categories:
+        raise TaxonomyError(f"Taxonomy file {config_path} defines no categories")
+    logger.info("Loaded %d fault categories from %s", len(categories), config_path)
+    return categories
 
 
 def categorize_description(desc: str, categories, multi_label: bool = False):
@@ -53,12 +72,12 @@ def categorize_description(desc: str, categories, multi_label: bool = False):
 
     Returns:
         A single category string (multi_label=False) or a list (multi_label=True).
+        Events matching no rule get UNCATEGORIZED.
     """
-    if not categories or not desc:
-        return ["Uncategorized"] if multi_label else "Uncategorized"
-    desc_lower = str(desc).lower()
-    matches = [cat_name for cat_name, kws in categories if any(kw in desc_lower for kw in kws)]
+    matches = []
+    if categories and desc:
+        desc_lower = str(desc).lower()
+        matches = [cat_name for cat_name, kws in categories if any(kw in desc_lower for kw in kws)]
     if multi_label:
-        return matches if matches else ["Other / Uncategorized"]
-    else:
-        return matches[0] if matches else "Other / Uncategorized"
+        return matches or [UNCATEGORIZED]
+    return matches[0] if matches else UNCATEGORIZED

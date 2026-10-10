@@ -1,47 +1,45 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { TrendingUp, TrendingDown, Minus, Loader2, Calendar, BarChart3 } from 'lucide-react';
-import { apiFetch } from '@/app/apiClient';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { TrendingUp, TrendingDown, Minus, Loader2, BarChart3 } from 'lucide-react';
+import { apiJson } from '@/lib/api';
+import type { TrendsResponse } from '@/lib/types';
+import ErrorState from './ErrorState';
 
-interface TrendRun {
-    id: string;
-    date: string;
-    file: string;
-    total_failures: number;
-    duration_hours: number;
-    mtbf_hours: number;
-    failure_rate_per_hour: number;
-}
-
-interface TrendsResponse {
-    runs: TrendRun[];
-    trend: string;
-    mtbf_change_pct: number;
-    rate_change_pct: number;
-    num_runs: number;
+function formatNumber(value: unknown): string {
+    return typeof value === 'number' ? value.toFixed(4) : String(value ?? '');
 }
 
 export default function TrendsView() {
     const [data, setData] = useState<TrendsResponse | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<unknown>(null);
+
+    const [reloadKey, setReloadKey] = useState(0);
 
     useEffect(() => {
-        fetchTrends();
-    }, []);
+        let cancelled = false;
+        apiJson<TrendsResponse>('/trends', {}, 'Failed to load trends')
+            .then(json => {
+                if (cancelled) return;
+                setData(json);
+                setError(null);
+            })
+            .catch((err: unknown) => {
+                if (!cancelled) setError(err);
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [reloadKey]);
 
-    const fetchTrends = async () => {
-        try {
-            const response = await apiFetch('/trends');
-            if (response.ok) {
-                setData(await response.json());
-            }
-        } catch (error) {
-            console.error('Failed to fetch trends:', error);
-        } finally {
-            setIsLoading(false);
-        }
+    const retry = () => {
+        setIsLoading(true);
+        setReloadKey(k => k + 1);
     };
 
     const chartData = useMemo(() => {
@@ -65,7 +63,16 @@ export default function TrendsView() {
         );
     }
 
-    if (!data || data.num_runs < 2) {
+    if (error) {
+        return (
+            <div className="max-w-4xl animate-in fade-in duration-500 space-y-6">
+                <h2 className="text-3xl font-bold text-white tracking-tight">Reliability Trends</h2>
+                <ErrorState title="Could not load trend data" error={error} onRetry={retry} />
+            </div>
+        );
+    }
+
+    if (!data || (data.num_runs ?? data.runs.length) < 2) {
         return (
             <div className="max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-700">
                 <h2 className="text-3xl font-bold text-white mb-6 tracking-tight">Reliability Trends</h2>
@@ -95,12 +102,12 @@ export default function TrendsView() {
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-3xl font-bold text-white mb-2 tracking-tight">Reliability Trends</h2>
-                    <p className="text-slate-400 text-sm">Cross-run comparison of {data.num_runs} archived analyses.</p>
+                    <p className="text-slate-400 text-sm">Cross-run comparison of {data.num_runs ?? data.runs.length} archived analyses.</p>
                 </div>
                 <div className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-slate-900/50 border border-slate-800">
                     {trendIcon}
                     <span className={`text-sm font-semibold ${trendColor}`}>
-                        MTBF {trendLabel} ({data.mtbf_change_pct > 0 ? '+' : ''}{data.mtbf_change_pct}%)
+                        MTBF {trendLabel} ({(data.mtbf_change_pct ?? 0) > 0 ? '+' : ''}{data.mtbf_change_pct ?? 0}%)
                     </span>
                 </div>
             </div>
@@ -118,7 +125,7 @@ export default function TrendsView() {
                             <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} angle={-30} textAnchor="end" height={50} />
                             <YAxis tick={{ fontSize: 10, fill: '#64748b' }} label={{ value: 'MTBF (hours)', angle: -90, position: 'left', style: { fontSize: 9, fill: '#475569' } }} />
                             <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '11px' }}
-                                formatter={(value: any) => [typeof value === 'number' ? value.toFixed(4) : value, 'MTBF']} />
+                                formatter={(value) => [formatNumber(value), 'MTBF']} />
                             <Line type="monotone" dataKey="mtbf" stroke="#3b82f6" strokeWidth={2.5} dot={{ r: 4, fill: '#3b82f6' }} name="MTBF (hours)" />
                         </LineChart>
                     </ResponsiveContainer>
@@ -138,7 +145,7 @@ export default function TrendsView() {
                             <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} angle={-30} textAnchor="end" height={50} />
                             <YAxis tick={{ fontSize: 10, fill: '#64748b' }} label={{ value: 'Failures / hour', angle: -90, position: 'left', style: { fontSize: 9, fill: '#475569' } }} />
                             <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '11px' }}
-                                formatter={(value: any) => [typeof value === 'number' ? value.toFixed(4) : value, 'Rate']} />
+                                formatter={(value) => [formatNumber(value), 'Rate']} />
                             <Line type="monotone" dataKey="failureRate" stroke="#ef4444" strokeWidth={2.5} dot={{ r: 4, fill: '#ef4444' }} name="Failure Rate (/h)" />
                         </LineChart>
                     </ResponsiveContainer>

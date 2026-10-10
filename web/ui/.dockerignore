@@ -1,0 +1,27 @@
+# Dependencies and build output are produced inside the image
+node_modules
+.next
+out
+build
+
+# Secrets / local env
+.env
+.env*
+
+# Tests and tooling output
+coverage
+tests
+test-results
+playwright-report
+vitest.config.mts
+*.tsbuildinfo
+next-env.d.ts
+
+# Misc
+.git
+.gitignore
+.DS_Store
+npm-debug.log*
+Dockerfile
+.dockerignore
+README.md

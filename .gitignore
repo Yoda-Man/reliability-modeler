@@ -2,26 +2,40 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Secrets (keep the template)
 .env
+.env.*
+!.env.example
 
 # Runtime config (prevent accidental commits)
 settings.json
 web/api/settings.json
 
-# Analysis Output & Logs
+# Analysis output, logs, backups
 output/
 logs/
+backups/
 temp_uploads/
 temp_plots/
 tests/test_output/
 *.log
 
 # Web UI
+node_modules/
 web/ui/node_modules/
 web/ui/.next/
 web/ui/out/
 web/ui/build/
+web/ui/coverage/
 web/ui/.env.local
+coverage/
 
 # IDEs
 .vscode/

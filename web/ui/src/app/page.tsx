@@ -1,8 +1,10 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp, Bug } from 'lucide-react';
-import { apiFetch } from './apiClient';
+import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp, Bug, UserCircle } from 'lucide-react';
+import { apiJson } from '@/lib/api';
+import type { AnalysisResults } from '@/lib/types';
+import SystemStatus from '@/components/SystemStatus';
 import Dashboard from '@/components/Dashboard';
 import MethodologyView from '@/components/Methodology';
 import ConfigView from '@/components/ConfigView';
@@ -16,34 +18,21 @@ import AboutView from '@/components/AboutView';
 export default function Home() {
   const [activeTab, setActiveTab] = useState('sentry');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<AnalysisResults | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [futureHours, setFutureHours] = useState(1000);
 
   const handleSentryAnalyze = async (org: string, project: string, days: number) => {
     setIsAnalyzing(true);
     try {
-      const response = await apiFetch('/ingest/sentry', {
+      // Errors (ApiError with status + detail) propagate to SentryView, which displays them.
+      const data = await apiJson<AnalysisResults>('/ingest/sentry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ org, project, days, future_hours: futureHours }),
-      });
-
-      if (!response.ok) {
-        let detail = 'Failed to pull data from Sentry.';
-        try {
-          const errBody = await response.json();
-          detail = errBody.detail || detail;
-        } catch { /* ignore parse errors */ }
-        throw new Error(detail);
-      }
-
-      const data = await response.json();
+      }, 'Failed to pull data from Sentry');
       setResults(data);
       setActiveTab('dashboard');
-    } catch (error: any) {
-      console.error('Error pulling from Sentry:', error);
-      throw error; // re-throw so SentryView can display it
     } finally {
       setIsAnalyzing(false);
     }
@@ -190,13 +179,7 @@ export default function Home() {
         </nav>
 
         <div className="p-6 border-t border-slate-900">
-          <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
-            <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 font-bold">System Status</p>
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-xs text-slate-300 font-medium tracking-wide">Operational</span>
-            </div>
-          </div>
+          <SystemStatus />
         </div>
       </aside>
 
@@ -216,8 +199,8 @@ export default function Home() {
                 New Analysis
               </button>
             )}
-            <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-blue-400">
-              TM
+            <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400" aria-label="Signed-in user">
+              <UserCircle className="w-5 h-5" />
             </div>
           </div>
         </header>

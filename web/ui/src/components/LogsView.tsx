@@ -2,51 +2,47 @@
 
 import React, { useState, useEffect } from 'react';
 import { History, FileText, Calendar, Search, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
-import { apiFetch } from '@/app/apiClient';
+import { apiJson } from '@/lib/api';
+import type { LogsResponse } from '@/lib/types';
+import ErrorState from './ErrorState';
 
 const PAGE_SIZE = 50;
-
-interface LogEntry {
-    id: string;
-    date: string;
-    file: string;
-    status: string;
-    summary: {
-        total_failures: number;
-        duration_hours: number;
-    };
-}
-
-interface LogsResponse {
-    total: number;
-    logs: LogEntry[];
-}
 
 export default function LogsView() {
     const [data, setData] = useState<LogsResponse>({ total: 0, logs: [] });
     const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<unknown>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [offset, setOffset] = useState(0);
 
-    const fetchLogs = async (newOffset: number = 0) => {
-        setIsLoading(true);
-        try {
-            const response = await apiFetch(`/logs?limit=${PAGE_SIZE}&offset=${newOffset}`);
-            if (response.ok) {
-                const json: LogsResponse = await response.json();
-                setData(json);
-                setOffset(newOffset);
-            }
-        } catch (error) {
-            console.error('Failed to fetch logs:', error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
+    const [requestedOffset, setRequestedOffset] = useState(0);
+    const [reloadKey, setReloadKey] = useState(0);
 
     useEffect(() => {
-        fetchLogs(0);
-    }, []);
+        let cancelled = false;
+        apiJson<LogsResponse>(`/logs?limit=${PAGE_SIZE}&offset=${requestedOffset}`, {}, 'Failed to load analysis archive')
+            .then(json => {
+                if (cancelled) return;
+                setData(json);
+                setOffset(requestedOffset);
+                setError(null);
+            })
+            .catch((err: unknown) => {
+                if (!cancelled) setError(err);
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [requestedOffset, reloadKey]);
+
+    const fetchLogs = (newOffset: number) => {
+        setIsLoading(true);
+        setRequestedOffset(newOffset);
+        setReloadKey(k => k + 1);
+    };
 
     const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
     const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -61,6 +57,15 @@ export default function LogsView() {
             <div className="flex flex-col items-center justify-center h-64 space-y-4">
                 <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
                 <p className="text-slate-400">Loading analysis archives...</p>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="max-w-5xl animate-in fade-in duration-500 space-y-6">
+                <h2 className="text-3xl font-bold text-white tracking-tight">Analysis Archive</h2>
+                <ErrorState title="Could not load the analysis archive" error={error} onRetry={() => fetchLogs(offset)} />
             </div>
         );
     }
@@ -137,7 +142,7 @@ export default function LogsView() {
                         <History className="w-16 h-16 text-slate-800 mb-6" />
                         <h4 className="text-white font-semibold mb-2 text-lg">No Analysis History Found</h4>
                         <p className="text-sm text-slate-500 max-w-sm mx-auto">
-                            Run your first reliability analysis to see reports archived here. This view automatically syncs with the engine's output.
+                            Run your first reliability analysis to see reports archived here. This view automatically syncs with the engine&apos;s output.
                         </p>
                     </div>
                 )}

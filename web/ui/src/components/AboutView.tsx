@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Github, Globe, Heart, ShieldCheck, Mail, Linkedin } from 'lucide-react';
+import { Github, Globe, Heart, ShieldCheck } from 'lucide-react';
 
 export default function AboutView() {
     return (

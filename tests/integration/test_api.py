@@ -1,146 +1,152 @@
 """
-Integration tests for the Reliability Modeler API.
+Integration tests for a running Reliability Modeler API.
 
 Run with: python -m pytest tests/integration/ -v
-Requires the API server to be running on localhost:8000,
-or set RELIABILITY_API_URL environment variable.
+
+Environment:
+    RELIABILITY_API_URL            base URL (default http://localhost:8000)
+    RELIABILITY_API_KEY            sent as X-API-Key (required by the API since 2.9.0)
+    RM_INTEGRATION_ALLOW_WRITE     set to "true" to run tests that modify live
+                                   config (they restore the original afterwards)
+
+All tests are skipped when the API is unreachable.
 """
 
 import os
-import pytest
-import requests
 import time
 
-API_URL = os.getenv("RELIABILITY_API_URL", "http://localhost:8000")
+import pytest
+import requests
+
+API_URL = os.getenv("RELIABILITY_API_URL", "http://localhost:8000").rstrip("/")
+API_KEY = os.getenv("RELIABILITY_API_KEY", "")
+ALLOW_WRITE = os.getenv("RM_INTEGRATION_ALLOW_WRITE", "").lower() in {"1", "true", "yes"}
+HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
+
+pytestmark = pytest.mark.integration
 
 
 def _api_available():
-    """Skip tests if API is not running."""
     try:
-        r = requests.get(f"{API_URL}/health", timeout=2)
-        return r.status_code == 200
-    except requests.ConnectionError:
+        return requests.get(f"{API_URL}/health/live", timeout=2).status_code == 200
+    except requests.RequestException:
         return False
 
 
-@pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
-class TestHealthEndpoint:
-    """Test the /health endpoint."""
+requires_api = pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
+requires_key = pytest.mark.skipif(not API_KEY, reason="RELIABILITY_API_KEY not set")
 
-    def test_health_returns_ok(self):
+
+def get(path, **kw):
+    return requests.get(f"{API_URL}{path}", headers=HEADERS, timeout=10, **kw)
+
+
+def post(path, **kw):
+    return requests.post(f"{API_URL}{path}", headers=HEADERS, timeout=10, **kw)
+
+
+@requires_api
+class TestHealthEndpoint:
+    def test_liveness(self):
+        assert requests.get(f"{API_URL}/health/live", timeout=5).json() == {"status": "ok"}
+
+    def test_health_shape(self):
         r = requests.get(f"{API_URL}/health", timeout=5)
-        assert r.status_code == 200
+        assert r.status_code in (200, 503)
         data = r.json()
-        assert data["status"] == "ok"
-        assert "version" in data
-        assert "timestamp" in data
+        assert data["status"] in ("ok", "degraded", "error")
+        assert {"version", "timestamp", "checks"} <= set(data)
+        assert set(data["checks"]) == {"output_writable", "config_readable", "sentry_token_configured"}
 
     def test_health_response_time(self):
         start = time.time()
-        r = requests.get(f"{API_URL}/health", timeout=5)
-        elapsed = time.time() - start
-        assert r.status_code == 200
-        assert elapsed < 1.0, f"Health check took {elapsed:.2f}s, expected < 1s"
+        requests.get(f"{API_URL}/health", timeout=5)
+        assert time.time() - start < 1.0
+
+    def test_request_id_echoed(self):
+        r = requests.get(f"{API_URL}/health/live", headers={"X-Request-ID": "itest-1"}, timeout=5)
+        assert r.headers.get("X-Request-ID") == "itest-1"
 
 
-@pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
+@requires_api
+class TestAuth:
+    def test_protected_without_key(self):
+        for path in ("/config", "/logs", "/docs", "/openapi.json", "/metrics"):
+            r = requests.get(f"{API_URL}{path}", timeout=5)
+            assert r.status_code == 401, path
+            assert r.json() == {"detail": "Invalid or missing API key"}
+
+
+@requires_api
+@requires_key
 class TestSentryEndpoint:
-    """Test the Sentry ingest endpoints."""
-
     def test_ingest_sentry_requires_org(self):
-        r = requests.post(f"{API_URL}/ingest/sentry", json={"project": "foo"}, timeout=5)
-        assert r.status_code == 400
+        r = post("/ingest/sentry", json={"project": "foo"})
+        assert r.status_code == 422
+        assert isinstance(r.json()["detail"], str)
 
     def test_ingest_sentry_requires_project(self):
-        r = requests.post(f"{API_URL}/ingest/sentry", json={"org": "foo"}, timeout=5)
-        assert r.status_code == 400
+        assert post("/ingest/sentry", json={"org": "foo"}).status_code == 422
 
-    def test_ingest_sentry_missing_token(self):
-        # Without SENTRY_AUTH_TOKEN, should return 503 (or 502/400 depending on env)
-        r = requests.post(
-            f"{API_URL}/ingest/sentry",
-            json={"org": "foo", "project": "bar"},
-            timeout=5,
-        )
-        assert r.status_code in (503, 502, 400)
+    def test_ingest_sentry_days_bounds(self):
+        assert post("/ingest/sentry", json={"org": "foo", "project": "bar", "days": 91}).status_code == 422
 
     def test_list_projects_requires_org(self):
-        r = requests.get(f"{API_URL}/ingest/sentry/projects", timeout=5)
-        assert r.status_code == 400
+        assert get("/ingest/sentry/projects").status_code == 422
 
 
-@pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
+@requires_api
+@requires_key
 class TestConfigEndpoint:
-    """Test the /config GET and POST endpoints."""
-
     def test_get_config(self):
-        r = requests.get(f"{API_URL}/config", timeout=5)
+        r = get("/config")
         assert r.status_code == 200
         data = r.json()
-        assert "content" in data
-        assert "settings" in data
-
-    def test_post_valid_config(self):
-        r_get = requests.get(f"{API_URL}/config", timeout=5)
-        original = r_get.json()
-
-        new_content = "Database [db, sql]\nNetwork [http, timeout]\n"
-        r = requests.post(f"{API_URL}/config", json={"content": new_content}, timeout=5)
-        assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
-
-        r_get2 = requests.get(f"{API_URL}/config", timeout=5)
-        assert r_get2.json()["content"] == new_content
-
-        # Restore original
-        requests.post(f"{API_URL}/config", json={"content": original["content"]}, timeout=5)
+        assert "content" in data and "settings" in data
 
     def test_post_invalid_taxonomy_rejected(self):
-        r = requests.post(f"{API_URL}/config", json={"content": "not valid"}, timeout=5)
-        assert r.status_code == 400
+        # Rejected by validation, so live config is never touched.
+        r = post("/config", json={"content": "not valid"})
+        assert r.status_code == 422
+
+    @pytest.mark.skipif(not ALLOW_WRITE, reason="set RM_INTEGRATION_ALLOW_WRITE=true to modify live config")
+    def test_post_valid_config_and_restore(self):
+        original = get("/config").json()
+        new_content = "Database [db, sql]\nNetwork [http, timeout]\n"
+        try:
+            r = post("/config", json={"content": new_content})
+            assert r.status_code == 200, r.text
+            assert get("/config").json()["content"] == new_content
+        finally:
+            restore = post("/config", json={"content": original["content"]})
+            assert restore.status_code == 200, f"FAILED TO RESTORE CONFIG: {restore.text}"
 
 
-@pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
+@requires_api
+@requires_key
 class TestLogsEndpoint:
-    """Test the /logs endpoint."""
-
     def test_logs_returns_paginated_response(self):
-        r = requests.get(f"{API_URL}/logs", timeout=5)
+        r = get("/logs")
         assert r.status_code == 200
         data = r.json()
-        assert isinstance(data, dict)
-        assert "total" in data
-        assert "logs" in data
-        assert isinstance(data["logs"], list)
-        assert isinstance(data["total"], int)
+        assert isinstance(data["total"], int) and isinstance(data["logs"], list)
 
     def test_logs_pagination_respects_limit(self):
-        r = requests.get(f"{API_URL}/logs?limit=3&offset=0", timeout=5)
-        assert r.status_code == 200
-        data = r.json()
-        assert len(data["logs"]) <= 3
+        assert len(get("/logs", params={"limit": 3, "offset": 0}).json()["logs"]) <= 3
 
 
-@pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
+@requires_api
+@requires_key
 class TestTrendsEndpoint:
-    """Test the /trends endpoint."""
-
     def test_trends_returns_valid_response(self):
-        r = requests.get(f"{API_URL}/trends", timeout=5)
+        data = get("/trends").json()
+        assert isinstance(data["runs"], list) and "trend" in data
+
+
+@requires_api
+@requires_key
+class TestMetrics:
+    def test_metrics_text(self):
+        r = get("/metrics")
         assert r.status_code == 200
-        data = r.json()
-        assert "runs" in data
-        assert "trend" in data
-        assert isinstance(data["runs"], list)
-
-
-@pytest.mark.skipif(not _api_available(), reason=f"API not available on {API_URL}")
-class TestCORSSecurity:
-    """Test CORS and security headers."""
-
-    def test_cors_restricts_unknown_origin(self):
-        r = requests.get(f"{API_URL}/health", timeout=5)
-        assert r.status_code == 200
-
-    def test_health_no_sensitive_headers(self):
-        r = requests.get(f"{API_URL}/health", timeout=5)
-        assert "server" not in {k.lower() for k in r.headers} or "uvicorn" not in r.headers.get("server", "").lower()
+        assert "rm_http_requests_total" in r.text

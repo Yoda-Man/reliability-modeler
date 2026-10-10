@@ -83,10 +83,12 @@ def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10, maxiter=5000)
         bounds = [(1e-6,None), (1e-6,None)]
         mu_func = mo_mu
 
+    # TNC names its iteration cap 'maxfun'; the other supported solvers use 'maxiter'.
+    options = {'maxfun': maxiter} if method == 'TNC' else {'maxiter': maxiter}
     best_ll, best_params = -np.inf, None
     for x0 in initials:
         res = minimize(lambda p: -loglik_func(p, t, T), x0, bounds=bounds,
-                       method=method, tol=tol, options={'maxiter': maxiter})
+                       method=method, tol=tol, options=options)
         if res.success:
             ll = loglik_func(res.x, t, T)
             if ll > best_ll:

@@ -1,0 +1,32 @@
+# Fully pinned transitive dependency set for the API image (Python 3.13).
+# Generated with: pip install -r web/api/requirements.txt && pip freeze  (python:3.13-slim, clean venv)
+# Regenerate whenever web/api/requirements.txt changes.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+click==8.5.0
+contourpy==1.4.0
+cycler==0.12.1
+fastapi==0.141.1
+fonttools==4.66.1
+graphene==3.4.3
+graphql-core==3.2.13
+graphql-relay==3.2.0
+h11==0.16.0
+idna==3.20
+kiwisolver==1.5.1
+matplotlib==3.11.1
+networkx==3.6.1
+numpy==2.5.1
+packaging==26.3
+pillow==12.3.0
+pydantic==2.14.0
+pydantic_core==2.50.0
+pyparsing==3.3.3
+python-dateutil==2.9.0.post0
+scipy==1.18.0
+six==1.17.0
+starlette==1.7.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.1

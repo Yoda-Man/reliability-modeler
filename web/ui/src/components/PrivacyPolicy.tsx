@@ -52,7 +52,7 @@ export default function PrivacyPolicy() {
                                 Analysis Logs
                             </h4>
                             <p className="text-xs text-slate-400 leading-relaxed">
-                                Summaries of your analysis are stored in `/app/output/logs` to power the "Log Archives" feature. You have full control over these files via the host filesystem.
+                                Summaries of your analysis are stored in `/app/output/logs` to power the &quot;Log Archives&quot; feature. You have full control over these files via the host filesystem.
                             </p>
                         </div>
                     </div>
@@ -65,7 +65,7 @@ export default function PrivacyPolicy() {
                     </div>
                     <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800 backdrop-blur-xl border-l-rose-500/50">
                         <p className="text-slate-300 leading-relaxed italic">
-                            "We believe that engineering data is your most sensitive asset."
+                            &quot;We believe that engineering data is your most sensitive asset.&quot;
                         </p>
                         <p className="mt-4 text-sm text-slate-400 leading-relaxed">
                             The application contains zero telemetry, zero tracking cookies, and zero third-party analytics scripts (e.g., Google Analytics). Your usage patterns are private to you.

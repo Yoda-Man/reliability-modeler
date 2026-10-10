@@ -1,80 +1,115 @@
-# Reliability Modeler — Docker Workflow
+# Reliability Modeler — build, test, release and operate.
 #
-# This Makefile automates building and pushing Docker images to Docker Hub.
-# Modeled after the AnchorStay workflow.
+#   make help
+#
+# VERSION is read from modeler/__init__.py (single source of truth).
+# Nothing here reads .env directly: docker compose loads .env itself, so
+# secrets never end up in make's environment.
 
-# Load .env so variables are available to recipes
-ifneq (,$(wildcard .env))
-    include .env
-    export
-endif
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DEFAULT_GOAL := help
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
-DOCKERHUB_USERNAME ?= $(error Set DOCKERHUB_USERNAME in .env or pass on command line)
-IMAGE_TAG          ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "latest")
-PLATFORM           ?= linux/amd64
+VERSION            := $(shell sed -nE 's/^__version__[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/p' modeler/__init__.py)
+DOCKERHUB_USERNAME ?= trustaldo
 REGISTRY           ?= docker.io
 PREFIX             := $(REGISTRY)/$(DOCKERHUB_USERNAME)/reliability-modeler
+PLATFORMS          ?= linux/amd64,linux/arm64
+BUILDER            ?= reliability-modeler-builder
+BACKUP_DIR         ?= ./backups
+PYTHON             ?= python3
 
-.PHONY: help build build-api build-ui push push-api push-ui clean
+# Local images use the same names compose pulls, tagged with VERSION.
+LOCAL_API := $(DOCKERHUB_USERNAME)/reliability-modeler-api:$(VERSION)
+LOCAL_UI  := $(DOCKERHUB_USERNAME)/reliability-modeler-ui:$(VERSION)
 
-help:
+.PHONY: help version build build-api build-ui test test-python test-ui smoke \
+        push _require-version _confirm-push _buildx up down logs backup restore clean
+
+help: ## Show this help
 	@echo ""
-	@echo "  Reliability Modeler — Docker Workflow"
+	@echo "  Reliability Modeler $(VERSION)"
 	@echo ""
-	@echo "  make build              Build all Docker images (tag: $(IMAGE_TAG))"
-	@echo "  make push               Push all images to Docker Hub"
-	@echo "  make clean              Remove local images"
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
+	    awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-10s %s\n", $$1, $$2}'
+	@echo ""
+	@echo "  Variables: DOCKERHUB_USERNAME=$(DOCKERHUB_USERNAME) PLATFORMS=$(PLATFORMS)"
+	@echo "             BACKUP_DIR=$(BACKUP_DIR)  (restore: make restore FILE=<archive>)"
 	@echo ""
 
-# ── Build ─────────────────────────────────────────────────────────────────────
-build: build-api build-ui
-	@echo "✓ All images built with tag: $(IMAGE_TAG)"
+version: ## Print the version from modeler/__init__.py
+	@echo "$(VERSION)"
 
-build-api:
-	@echo "→ Building API image..."
-	docker build --platform $(PLATFORM) \
-		-f web/api/Dockerfile \
-		-t reliability-modeler-api:$(IMAGE_TAG) \
-		-t $(PREFIX)-api:$(IMAGE_TAG) \
-		.
-	@echo "✓ reliability-modeler-api:$(IMAGE_TAG)"
+_require-version:
+	@if [ -z "$(VERSION)" ]; then echo "ERROR: could not read __version__ from modeler/__init__.py" >&2; exit 1; fi
 
-build-ui:
-	@echo "→ Building UI image..."
-	docker build --platform $(PLATFORM) \
-		-f web/ui/Dockerfile \
-		-t reliability-modeler-ui:$(IMAGE_TAG) \
-		-t $(PREFIX)-ui:$(IMAGE_TAG) \
-		./web/ui
-	@echo "✓ reliability-modeler-ui:$(IMAGE_TAG)"
+# ── Build (local, current architecture) ──────────────────────────────────────
+build: build-api build-ui ## Build both images locally (current arch), tagged :VERSION
 
-# ── Push ──────────────────────────────────────────────────────────────────────
-push: _confirm-push push-api push-ui
-	@echo "✓ All images pushed with tag: $(IMAGE_TAG)"
+build-api: _require-version
+	docker build -f web/api/Dockerfile -t $(LOCAL_API) .
 
-push-api: _docker-login
-	@echo "→ Pushing API..."
-	docker push $(PREFIX)-api:$(IMAGE_TAG)
+build-ui: _require-version
+	docker build -f web/ui/Dockerfile -t $(LOCAL_UI) ./web/ui
 
-push-ui: _docker-login
-	@echo "→ Pushing UI..."
-	docker push $(PREFIX)-ui:$(IMAGE_TAG)
+# ── Test ─────────────────────────────────────────────────────────────────────
+test: test-python test-ui ## Run Python unit tests (with coverage) and UI tests
 
-# ── Private helpers ───────────────────────────────────────────────────────────
+test-python:
+	$(PYTHON) -m pytest tests --ignore=tests/integration \
+	    --cov=modeler --cov=web/api --cov-report=term-missing
+
+test-ui:
+	cd web/ui && npm test
+
+smoke: _require-version ## Run scripts/smoke-test.sh against locally built :VERSION images
+	IMAGE_TAG=$(VERSION) DOCKERHUB_NAMESPACE=$(DOCKERHUB_USERNAME) ./scripts/smoke-test.sh
+
+# ── Release (multi-arch push to Docker Hub) ──────────────────────────────────
+push: _require-version _confirm-push _buildx ## Build multi-arch and push :VERSION and :latest (both images)
+	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) \
+	    -f web/api/Dockerfile \
+	    -t $(PREFIX)-api:$(VERSION) -t $(PREFIX)-api:latest \
+	    --push .
+	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) \
+	    -f web/ui/Dockerfile \
+	    -t $(PREFIX)-ui:$(VERSION) -t $(PREFIX)-ui:latest \
+	    --push ./web/ui
+	@echo "Pushed $(PREFIX)-{api,ui}:{$(VERSION),latest} for $(PLATFORMS)"
+
 _confirm-push:
 	@echo ""
-	@echo "  About to push:"
-	@echo "    $(PREFIX)-api:$(IMAGE_TAG)"
-	@echo "    $(PREFIX)-ui:$(IMAGE_TAG)"
+	@echo "  About to build ($(PLATFORMS)) and push:"
+	@echo "    $(PREFIX)-api:$(VERSION)  and :latest"
+	@echo "    $(PREFIX)-ui:$(VERSION)   and :latest"
+	@if [ -n "$$(git status --porcelain 2>/dev/null)" ]; then echo "  WARNING: working tree has uncommitted changes."; fi
 	@echo ""
-	@read -r -p "  Push to Docker Hub? [y/N] " CONFIRM && \
-	    [[ "$$CONFIRM" =~ ^[Yy](es)?$$ ]] || (echo "Aborted."; exit 1)
+	@read -r -p "  Push to Docker Hub? [y/N] " CONFIRM; \
+	    case "$$CONFIRM" in [yY]|[yY][eE][sS]) ;; *) echo "Aborted."; exit 1;; esac
 
-_docker-login:
-	@docker info 2>/dev/null | grep -q "Username" || docker login
+_buildx:
+	@docker buildx inspect $(BUILDER) >/dev/null 2>&1 || \
+	    docker buildx create --name $(BUILDER) --driver docker-container >/dev/null
+	@docker buildx inspect --bootstrap $(BUILDER) >/dev/null
 
-clean:
-	docker image prune -f
-	docker images | grep reliability-modeler | awk '{print $$3}' | xargs docker rmi -f 2>/dev/null || true
-	@echo "✓ Local images removed"
+# ── Operate (uses .env in the repo root) ─────────────────────────────────────
+up: ## docker compose up -d (requires .env)
+	docker compose up -d
+
+down: ## docker compose down (volumes are kept)
+	docker compose down
+
+logs: ## Follow logs of both services
+	docker compose logs -f --tail=200
+
+backup: ## Archive output_data + config_data volumes into BACKUP_DIR
+	./scripts/backup.sh "$(BACKUP_DIR)"
+
+restore: ## Restore volumes from FILE=<archive> (stack must be stopped)
+	@if [ -z "$(FILE)" ]; then echo "usage: make restore FILE=backups/<archive>.tar.gz" >&2; exit 1; fi
+	./scripts/restore.sh "$(FILE)"
+
+clean: ## Remove local reliability-modeler images and Python/UI caches
+	-docker images --format '{{.Repository}}:{{.Tag}}' | grep 'reliability-modeler-' | xargs -r docker rmi 2>/dev/null
+	rm -rf .pytest_cache .coverage htmlcov coverage.xml web/ui/.next
+	find . -path ./web/ui/node_modules -prune -o -name __pycache__ -type d -prune -exec rm -rf {} +

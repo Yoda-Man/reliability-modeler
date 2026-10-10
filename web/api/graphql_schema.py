@@ -8,9 +8,24 @@ cascade chains, community clusters, and raw graph structures for visualization.
 
 from __future__ import annotations
 
-import graphene
+import json
 import logging
-from typing import List, Optional
+import re
+import threading
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
+
+import graphene
+from graphql import GraphQLError, parse, validate
+from graphql.error import GraphQLSyntaxError
+from graphql.language import FieldNode
+from graphql.validation import ValidationRule, specified_rules
+from graphene.validation import depth_limit_validator
+
+from modeler import config as rm_config
+from modeler.graphs import FailureGraphReport, build_failure_graphs
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -28,9 +43,9 @@ class CentralityScoreType(graphene.ObjectType):
 
 class CascadeChainType(graphene.ObjectType):
     chain = graphene.List(graphene.String, description="Ordered list of categories in the cascade")
-    occurrence_count = graphene.Int(description="How many times this cascade was observed")
+    occurrence_count = graphene.Int(description="Number of distinct trigger events at which this cascade sequence recurred")
     avg_latency_hours = graphene.Float(description="Average time from first to last failure in the chain")
-    confidence = graphene.Float(description="Occurrence count / total cascades")
+    confidence = graphene.Float(description="Occurrence count / number of events containing the trigger category")
 
 
 class CommunityClusterType(graphene.ObjectType):
@@ -107,28 +122,55 @@ class FailureGraphReportType(graphene.ObjectType):
 # Query
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Limits & errors
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CASCADE_WINDOW_RANGE = (1.0, 720.0)
+MIN_COOCCURRENCE_RANGE = (1, 1000)
+LIMIT_RANGE = (1, 100)
+MAX_QUERY_DEPTH = 8
+MEMORY_CACHE_SIZE = 100       # categorized analyses kept in memory
+REPORT_CACHE_SIZE = 64        # built graph reports kept in memory
+CROSS_ANALYSIS_CAP = 50       # most recent analyses examined by keystoneCategoriesAcross
+
+
+class GraphQLUserError(Exception):
+    """An error whose message is safe to return to the client verbatim."""
+
+
+def _check_range(name: str, value, bounds) -> None:
+    lo, hi = bounds
+    if value is None or not (lo <= value <= hi):
+        raise GraphQLUserError(f"{name} must be between {lo:g} and {hi:g}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Query
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class Query(graphene.ObjectType):
     """Root GraphQL query for the Reliability Modeler."""
 
     failure_graph = graphene.Field(
         FailureGraphReportType,
         analysis_id=graphene.String(required=True, description="Analysis ID from /ingest/sentry"),
-        cascade_window_hours=graphene.Float(default_value=2.0),
-        min_cooccurrence=graphene.Int(default_value=3),
+        cascade_window_hours=graphene.Float(default_value=2.0, description="1..720"),
+        min_cooccurrence=graphene.Int(default_value=3, description="1..1000"),
         description="Get the full failure graph report for a specific analysis run",
     )
 
     keystone_categories = graphene.List(
         CentralityScoreType,
         analysis_id=graphene.String(required=True),
-        limit=graphene.Int(default_value=10),
+        limit=graphene.Int(default_value=10, description="1..100"),
         description="Get the most central (keystone) failure categories",
     )
 
     cascade_chains = graphene.List(
         CascadeChainType,
         analysis_id=graphene.String(required=True),
-        limit=graphene.Int(default_value=10),
+        limit=graphene.Int(default_value=10, description="1..100"),
         description="Get the most common failure cascade chains",
     )
 
@@ -139,7 +181,7 @@ class Query(graphene.ObjectType):
 
     keystone_categories_across = graphene.List(
         KeystoneFrequencyType,
-        limit=graphene.Int(default_value=10),
+        limit=graphene.Int(default_value=10, description="1..100"),
         description="Categories most consistently keystone across ALL analyses",
     )
 
@@ -147,45 +189,38 @@ class Query(graphene.ObjectType):
         return list_available_analyses()
 
     def resolve_keystone_categories_across(self, info, limit=10):
-        from modeler.graphs import build_failure_graphs
-        from collections import defaultdict
-
-        freq = defaultdict(lambda: {"count": 0, "pagerank_sum": 0.0})
+        _check_range("limit", limit, LIMIT_RANGE)
+        freq: Dict[str, Dict[str, float]] = {}
         examined = 0
 
-        # Cap to the most recent 50 analyses to bound cost
-        analyses = list_available_analyses()[-50:]
-        for aid in analyses:
-            categorized = _get_categorized_data(info, aid)
-            if not categorized:
-                continue
-            report = build_failure_graphs(categorized)
+        # Cap to the most recent analyses to bound cost
+        for aid in list_available_analyses()[-CROSS_ANALYSIS_CAP:]:
+            report = get_failure_report(aid)
             if report is None:
                 continue
             examined += 1
             for c in report.centrality:
                 if c.is_keystone:
-                    freq[c.node]["count"] += 1
-                    freq[c.node]["pagerank_sum"] += c.pagerank
+                    d = freq.setdefault(c.node, {"count": 0, "pagerank_sum": 0.0})
+                    d["count"] += 1
+                    d["pagerank_sum"] += c.pagerank
 
-        result = []
-        for node, d in freq.items():
-            result.append({
+        result = [
+            {
                 "node": node,
-                "keystone_count": d["count"],
+                "keystone_count": int(d["count"]),
                 "avg_pagerank": round(d["pagerank_sum"] / max(1, d["count"]), 6),
                 "total_analyses": examined,
-            })
-
+            }
+            for node, d in freq.items()
+        ]
         result.sort(key=lambda x: (-x["keystone_count"], -x["avg_pagerank"]))
         return result[:limit]
 
     def resolve_failure_graph(self, info, analysis_id, cascade_window_hours=2.0, min_cooccurrence=3):
-        from modeler.graphs import build_failure_graphs
-        categorized = _get_categorized_data(info, analysis_id)
-        if categorized is None:
-            return None
-        report = build_failure_graphs(categorized, cascade_window_hours, min_cooccurrence)
+        _check_range("cascadeWindowHours", cascade_window_hours, CASCADE_WINDOW_RANGE)
+        _check_range("minCooccurrence", min_cooccurrence, MIN_COOCCURRENCE_RANGE)
+        report = get_failure_report(analysis_id, cascade_window_hours, min_cooccurrence)
         if report is None:
             return None
         return {
@@ -198,96 +233,205 @@ class Query(graphene.ObjectType):
         }
 
     def resolve_keystone_categories(self, info, analysis_id, limit=10):
-        from modeler.graphs import build_failure_graphs
-        categorized = _get_categorized_data(info, analysis_id)
-        if categorized is None:
-            return []
-        report = build_failure_graphs(categorized)
-        if report is None:
-            return []
-        return report.centrality[:limit]
+        _check_range("limit", limit, LIMIT_RANGE)
+        report = get_failure_report(analysis_id)
+        return report.centrality[:limit] if report else []
 
     def resolve_cascade_chains(self, info, analysis_id, limit=10):
-        from modeler.graphs import build_failure_graphs
-        categorized = _get_categorized_data(info, analysis_id)
-        if categorized is None:
-            return []
-        report = build_failure_graphs(categorized)
-        if report is None:
-            return []
-        return report.cascade_chains[:limit]
+        _check_range("limit", limit, LIMIT_RANGE)
+        report = get_failure_report(analysis_id)
+        return report.cascade_chains[:limit] if report else []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Helpers
+# Storage helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import json
-import re
-from pathlib import Path
-
-_BASE_DIR = Path(__file__).resolve().parent
-# Docker flat layout puts everything in /app; local dev uses web/api/.
-_ROOT_DIR = _BASE_DIR if (_BASE_DIR / "fault_categories.conf").exists() else _BASE_DIR.parent.parent
-_ANALYSES_DIR = _ROOT_DIR / "output" / "analyses"
-
-# Analysis IDs are generated as "AN-YYYYMMDD-HHMMSS"
-_ANALYSIS_ID_RE = re.compile(r'^AN-\d{8}-\d{6}$')
-
-# In-memory cache of categorized data keyed by analysis_id.
-# Persisted to output/analyses/{id}.json so GraphQL can query historical
-# analyses across restarts.
-_analysis_store: dict = {}
+# Analysis IDs: "AN-YYYYMMDD-HHMMSS" (<= 2.8) or "AN-YYYYMMDD-HHMMSS-<6 hex>" (>= 2.9)
+ANALYSIS_ID_RE = re.compile(r'^AN-\d{8}-\d{6}(-[0-9a-f]{6})?$')
 
 
-def store_analysis_data(analysis_id: str, categorized_list: list):
+class _LRU:
+    """Tiny thread-safe bounded LRU mapping."""
+
+    def __init__(self, maxsize: int):
+        self.maxsize = maxsize
+        self._data: "OrderedDict[Any, Any]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            if key not in self._data:
+                return None
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def put(self, key, value) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
+
+    def discard_where(self, predicate) -> None:
+        with self._lock:
+            for k in [k for k in self._data if predicate(k)]:
+                del self._data[k]
+
+    def keys(self) -> List[Any]:
+        with self._lock:
+            return list(self._data.keys())
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._data
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+
+# Categorized data keyed by analysis_id (persisted to OUTPUT_DIR/analyses/{id}.json
+# so GraphQL can query historical analyses across restarts).
+_analysis_store = _LRU(MEMORY_CACHE_SIZE)
+# Built graph reports keyed by (analysis_id, cascade_window_hours, min_cooccurrence).
+_report_cache = _LRU(REPORT_CACHE_SIZE)
+
+
+def _analysis_path(analysis_id: str):
+    return rm_config.analyses_dir() / f"{analysis_id}.json"
+
+
+def store_analysis_data(analysis_id: str, categorized_list: list) -> None:
     """Store categorized failure data (memory + disk) for later GraphQL queries."""
-    _analysis_store[analysis_id] = categorized_list
-    # Prune in-memory cache (keep last 100); disk copy remains
-    if len(_analysis_store) > 100:
-        oldest = sorted(_analysis_store.keys())[0]
-        del _analysis_store[oldest]
-
-    # Persist to disk for historical queries
+    _analysis_store.put(analysis_id, categorized_list)
+    _report_cache.discard_where(lambda k: k[0] == analysis_id)
     try:
-        _ANALYSES_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _ANALYSES_DIR / f".{analysis_id}.tmp"
-        final = _ANALYSES_DIR / f"{analysis_id}.json"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(categorized_list, f)
-        tmp.replace(final)
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Failed to persist analysis data: {e}")
+        rm_config.atomic_write_json(_analysis_path(analysis_id), [list(r) for r in categorized_list])
+    except (OSError, TypeError, ValueError):
+        logger.warning("Failed to persist analysis data for %s", analysis_id, exc_info=True)
 
 
-def _get_categorized_data(info, analysis_id: str) -> Optional[list]:
+def forget_analyses(analysis_ids) -> None:
+    """Drop analyses (e.g. after retention pruning) from the in-memory caches."""
+    ids = set(analysis_ids)
+    if not ids:
+        return
+    _analysis_store.discard_where(lambda k: k in ids)
+    _report_cache.discard_where(lambda k: k[0] in ids)
+
+
+def clear_caches() -> None:
+    _analysis_store.clear()
+    _report_cache.clear()
+
+
+def get_categorized_data(analysis_id: str) -> Optional[list]:
     """Retrieve stored categorized data — memory first, then disk fallback."""
     # Validate the analysis ID format to prevent path traversal
-    if not _ANALYSIS_ID_RE.match(analysis_id):
+    if not isinstance(analysis_id, str) or not ANALYSIS_ID_RE.match(analysis_id):
         return None
-    if analysis_id in _analysis_store:
-        return _analysis_store[analysis_id]
-    # Disk fallback (survives restart)
-    disk_path = _ANALYSES_DIR / f"{analysis_id}.json"
-    if disk_path.exists():
-        try:
-            with open(disk_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            _analysis_store[analysis_id] = data  # warm the cache
-            return data
-        except Exception:
-            return None
-    return None
+    cached = _analysis_store.get(analysis_id)
+    if cached is not None:
+        return cached
+    disk_path = _analysis_path(analysis_id)
+    if not disk_path.is_file():
+        return None
+    try:
+        with open(disk_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("Analysis file %s is unreadable or corrupt; ignoring it", disk_path, exc_info=True)
+        return None
+    if not isinstance(data, list):
+        logger.warning("Analysis file %s has unexpected shape (%s); ignoring it", disk_path, type(data).__name__)
+        return None
+    _analysis_store.put(analysis_id, data)  # warm the (bounded) cache
+    return data
+
+
+def get_failure_report(
+    analysis_id: str,
+    cascade_window_hours: float = 2.0,
+    min_cooccurrence: int = 3,
+    categorized: Optional[list] = None,
+) -> Optional[FailureGraphReport]:
+    """Return the graph report for an analysis, building it at most once per parameter set."""
+    key = (analysis_id, float(cascade_window_hours), int(min_cooccurrence))
+    cached = _report_cache.get(key)
+    if cached is not None:
+        return cached
+    if categorized is None:
+        categorized = get_categorized_data(analysis_id)
+    if not categorized:
+        return None
+    report = build_failure_graphs(categorized, cascade_window_hours, min_cooccurrence)
+    if report is not None:
+        _report_cache.put(key, report)
+    return report
 
 
 def list_available_analyses() -> List[str]:
     """Return all analysis IDs available for GraphQL querying (memory + disk)."""
     ids = set(_analysis_store.keys())
-    if _ANALYSES_DIR.exists():
-        for f in _ANALYSES_DIR.glob("*.json"):
-            if _ANALYSIS_ID_RE.match(f.stem):
+    adir = rm_config.analyses_dir()
+    if adir.exists():
+        for f in adir.glob("*.json"):
+            if ANALYSIS_ID_RE.match(f.stem):
                 ids.add(f.stem)
     return sorted(ids)
 
 
 schema = graphene.Schema(query=Query)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Execution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class NoIntrospection(ValidationRule):
+    """Reject schema introspection (__schema, __type) while allowing __typename."""
+
+    def enter_field(self, node: FieldNode, *_args):
+        name = node.name.value
+        if name.startswith("__") and name != "__typename":
+            self.report_error(GraphQLError(f"Cannot query '{name}': introspection is disabled.", node))
+
+
+_EXTRA_RULES = (NoIntrospection, depth_limit_validator(max_depth=MAX_QUERY_DEPTH))
+
+
+def _sanitize_error(err: GraphQLError) -> str:
+    original = getattr(err, "original_error", None)
+    if original is None or isinstance(original, GraphQLUserError):
+        return err.message
+    logger.error("GraphQL resolver error at %s: %r", err.path, original,
+                 exc_info=(type(original), original, original.__traceback__))
+    return "Internal error while resolving field" + (f" '{err.path[-1]}'" if err.path else "")
+
+
+def execute_query(query: str, variables: Optional[dict] = None,
+                  operation_name: Optional[str] = None) -> Tuple[Dict[str, Any], bool]:
+    """Parse, validate (incl. depth + introspection rules) and execute a query.
+
+    Returns (response_body, ok). ``ok`` is False for syntax/validation errors,
+    which the API maps to HTTP 400. Resolver errors are sanitized: messages
+    from GraphQLUserError are returned verbatim, anything else is logged and
+    replaced with a generic message.
+    """
+    try:
+        document = parse(query)
+    except GraphQLSyntaxError as e:
+        return {"data": None, "errors": [e.message]}, False
+    validation_errors = validate(schema.graphql_schema, document, [*specified_rules, *_EXTRA_RULES])
+    if validation_errors:
+        return {"data": None, "errors": [e.message for e in validation_errors]}, False
+    result = schema.execute(query, variable_values=variables, operation_name=operation_name)
+    body: Dict[str, Any] = {"data": result.data}
+    if result.errors:
+        body["errors"] = [_sanitize_error(e) for e in result.errors]
+    return body, True
