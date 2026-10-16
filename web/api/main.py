@@ -587,7 +587,8 @@ async def get_logs(limit: int = 50, offset: int = 0):
     limit = max(1, min(limit, 200))
     offset = max(0, min(offset, 10000))
     all_logs = [entry for _, entry in await asyncio.to_thread(_read_json_files, rm_config.logs_dir())]
-    all_logs.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+    # 'date' has minute resolution; the ID embeds the second, so it breaks ties chronologically.
+    all_logs.sort(key=lambda x: (str(x.get('date', '')), str(x.get('id', ''))), reverse=True)
     return {"total": len(all_logs), "logs": all_logs[offset:offset + limit]}
 
 
@@ -1059,7 +1060,7 @@ async def ingest_sentry(payload: SentryIngestRequest):
             )
             display_name = f"sentry://{org}/ALL_PROJECTS ({days}d)"
         else:
-            t, categorized, t0, _ = await asyncio.wait_for(
+            t, categorized, t0, _, truncated = await asyncio.wait_for(
                 asyncio.to_thread(load_sentry_failures, org, project, auth_token, config_path, days,
                                   settings.multi_label, cancel_event=cancel),
                 timeout=ANALYSIS_TIMEOUT_SECONDS,

@@ -6,7 +6,7 @@ where cat_list = [(iso, hours, categories, desc), ...]
 
 Usage:
     from modeler.sentry import load_sentry_failures
-    t_hours, cat_list, t0, categories = load_sentry_failures(
+    t_hours, cat_list, t0, categories, truncated = load_sentry_failures(
         org="my-org", project="my-project",
         auth_token=os.environ["SENTRY_AUTH_TOKEN"],
         config_path=Path("fault_categories.conf"),
@@ -371,26 +371,27 @@ def load_sentry_failures(
     multi_label: bool = False,
     base_url: Optional[str] = None,
     cancel_event: Optional[threading.Event] = None,
-) -> Tuple[np.ndarray, List[Tuple], datetime, list]:
+) -> Tuple[np.ndarray, List[Tuple], datetime, list, bool]:
     """
     Pull failure events from a single Sentry project and return the normalized
     tuple the analysis pipeline expects:
-        (t_hours: np.ndarray, cat_list: [(iso, hours, categories, desc)], t0: datetime, fault_categories)
+        (t_hours: np.ndarray, cat_list: [(iso, hours, categories, desc)], t0: datetime, fault_categories,
+         truncated: bool)  # truncated = the per-project event cap was hit
 
     Raises TaxonomyError if the taxonomy cannot be loaded, SentryError on API
     failures and SentryCancelled if ``cancel_event`` is set mid-fetch.
     """
     fault_categories = load_fault_categories(config_path)
-    all_events, _ = _fetch_project_events(org, project, auth_token, _base_url(base_url), days, cancel_event)
+    all_events, truncated = _fetch_project_events(org, project, auth_token, _base_url(base_url), days, cancel_event)
 
     if not all_events:
         logger.warning("Sentry: no events found for %s/%s in last %d days", org, project, days)
-        return np.array([]), [], datetime.now(timezone.utc), fault_categories
+        return np.array([]), [], datetime.now(timezone.utc), fault_categories, False
 
     raw_events = _events_to_raw(all_events, f"{org}/{project}")
     t_hours, cat_list, t0 = _normalize_raw_events(raw_events, fault_categories, multi_label)
     logger.info("Sentry: processed %d failure events from %s/%s", len(cat_list), org, project)
-    return t_hours, cat_list, t0, fault_categories
+    return t_hours, cat_list, t0, fault_categories, truncated
 
 
 def load_sentry_failures_all(

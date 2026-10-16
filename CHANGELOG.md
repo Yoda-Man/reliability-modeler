@@ -5,6 +5,19 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.1] - 2026-10-16
+
+### Fixed
+- **Analysis archive order:** runs created in the same minute now list newest first (`/logs` breaks ties by analysis ID, which embeds the second).
+- **`truncated` for single projects:** a single project that hits Sentry's per-project event cap now reports `truncated: true` (previously only "all projects" runs did).
+- **AI Agents page and MCP docs:** `list_analyses` described as returning run summaries (not model fits); analysis time updated to ~4 min.
+
+### Added
+- MCP `run_analysis` accepts `future_hours`, so agents can choose the forecast horizon.
+
+### Docs
+- README rewritten and verified against the code, with screenshots (`docs/screenshots/`).
+
 ## [2.11.0] - 2026-10-16
 
 Fixes from the full-repo audit.

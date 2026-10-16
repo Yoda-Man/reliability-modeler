@@ -1,6 +1,6 @@
 # Reliability Modeler: User Manual
 
-Version 2.11.0
+Version 2.11.1
 
 ## 1. Introduction
 

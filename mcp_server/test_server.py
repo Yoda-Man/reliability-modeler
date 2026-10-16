@@ -24,8 +24,9 @@ def test_run_analysis_strips_heavy_fields_and_sends_payload():
                                          "graph_report": {"graph_json": {}, "num_communities": 2}})
 
     _use(handler)
-    out = server.run_analysis("acme", "web", days=7)
-    assert seen == {"path": "/api/ingest/sentry", "key": "k", "body": {"org": "acme", "project": "web", "days": 7}}
+    out = server.run_analysis("acme", "web", days=7, future_hours=2500)
+    assert seen == {"path": "/api/ingest/sentry", "key": "k",
+                    "body": {"org": "acme", "project": "web", "days": 7, "future_hours": 2500}}
     assert out == {"id": "AN-1", "graph_report": {"num_communities": 2}}
 
 

@@ -195,7 +195,7 @@ class TestHealth:
     def test_degraded_without_sentry_token(self, client):
         body = client.get("/health").json()
         assert body["status"] == "degraded"
-        assert body["version"] == "2.11.0"
+        assert body["version"] == "2.11.1"
         assert body["checks"] == {"output_writable": True, "config_readable": True,
                                   "sentry_token_configured": False}
         assert body["timestamp"].endswith("+00:00")
@@ -223,7 +223,7 @@ class TestHealth:
 
     def test_version_single_source(self, api_module):
         import modeler
-        assert api_module.app.version == modeler.__version__ == "2.11.0"
+        assert api_module.app.version == modeler.__version__ == "2.11.1"
 
 
 class TestMetrics:
@@ -361,7 +361,7 @@ class TestIngestPipeline:
 
         def fake(org, project, token, config_path, days, multi_label, cancel_event=None):
             calls.update(org=org, project=project, token=token, days=days, config_path=config_path)
-            return _synthetic_sentry()
+            return (*_synthetic_sentry(), False)
 
         monkeypatch.setattr(api_module, "load_sentry_failures", fake)
         resp = client.post("/ingest/sentry", json={"org": "acme", "project": "web", "days": 7,
@@ -397,7 +397,7 @@ class TestIngestPipeline:
     def test_response_carries_recent_events_total_and_horizon(self, api_module, client, sentry_token,
                                                                monkeypatch):
         t, cat, t0, cats = _synthetic_sentry(n=150)
-        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (t, cat, t0, cats))
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (t, cat, t0, cats, False))
         body = client.post("/ingest/sentry", json={"org": "o", "project": "p", "future_hours": 250}).json()
         assert body["categorized_total"] == 150
         assert [list(r) for r in body["categorized_failures"]] == [list(r) for r in cat[-100:]]
@@ -411,7 +411,7 @@ class TestIngestPipeline:
         t = np.linspace(0, 720, 100)
         t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
         cat = [(t0.isoformat(), float(x), "Database" if i % 2 else "Network", "d") for i, x in enumerate(t)]
-        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (t, cat, t0, []))
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (t, cat, t0, [], False))
         resp = client.post("/ingest/sentry", json={"org": "o", "project": "p"})
         assert resp.status_code == 200 and resp.json()["models"] == []
 
@@ -430,7 +430,7 @@ class TestIngestPipeline:
             finally:
                 done.set()
 
-        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: _synthetic_sentry())
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (*_synthetic_sentry(), False))
         monkeypatch.setattr(api_module, "fit_model", slow_fit)
         monkeypatch.setattr(api_module, "_run_analysis", tracked_run)
         monkeypatch.setattr(api_module, "ANALYSIS_TIMEOUT_SECONDS", 0.3)
@@ -466,9 +466,13 @@ class TestIngestPipeline:
         monkeypatch.setattr(api_module, "load_sentry_failures_all", fake_all)
         assert client.post("/ingest/sentry", json={"org": "acme", "project": "all"}).json()["truncated"] is True
 
+    def test_single_project_truncated_flag(self, api_module, client, sentry_token, monkeypatch):
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (*_synthetic_sentry(), True))
+        assert client.post("/ingest/sentry", json={"org": "acme", "project": "p"}).json()["truncated"] is True
+
     def test_no_events(self, api_module, client, sentry_token, monkeypatch):
         monkeypatch.setattr(api_module, "load_sentry_failures",
-                            lambda *a, **k: (np.array([]), [], datetime.now(timezone.utc), []))
+                            lambda *a, **k: (np.array([]), [], datetime.now(timezone.utc), [], False))
         assert "No failure events" in _assert_detail(
             client.post("/ingest/sentry", json={"org": "o", "project": "p"}), 400)
 
@@ -518,7 +522,7 @@ class TestIngestPipeline:
             release.wait(5)
             return {}
 
-        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: _synthetic_sentry())
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (*_synthetic_sentry(), False))
         monkeypatch.setattr(api_module, "_run_analysis", slow_analysis)
         monkeypatch.setattr(api_module, "ANALYSIS_TIMEOUT_SECONDS", 0.3)
         started = time.monotonic()
@@ -530,7 +534,7 @@ class TestIngestPipeline:
 
     def test_analysis_error_500_and_temp_cleanup(self, api_module, client, sentry_token,
                                                  monkeypatch, isolated_dirs):
-        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: _synthetic_sentry())
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (*_synthetic_sentry(), False))
 
         def explode(*a, **k):
             raise RuntimeError("plot exploded")
@@ -548,7 +552,7 @@ class TestIngestPipeline:
 
         def fake(org, project, token, config_path, days, multi_label, cancel_event=None):
             seen["multi_label"] = multi_label
-            return _synthetic_sentry()
+            return (*_synthetic_sentry(), False)
 
         real_fit = api_module.fit_model
 
@@ -562,7 +566,7 @@ class TestIngestPipeline:
         assert seen == {"multi_label": True, "method": "TNC"}
 
     def test_model_fit_failure_tolerated(self, api_module, client, sentry_token, monkeypatch):
-        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: _synthetic_sentry())
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (*_synthetic_sentry(), False))
 
         def flaky(t, T, model_name, **k):
             if model_name == "go":
@@ -634,6 +638,14 @@ class TestLogsAndTrends:
         assert body["total"] == 5
         assert [e["id"] for e in body["logs"]] == ["AN-20260104-000000", "AN-20260103-000000"]
         assert "corrupt" in caplog.text
+
+    def test_logs_same_minute_newest_first(self, client, isolated_dirs):
+        """Runs in the same minute share a 'date'; the ID's seconds must order them."""
+        out = isolated_dirs["output"]
+        ids = ["AN-20261016-172738-db2b50", "AN-20261016-172744-a45845", "AN-20261016-172741-7253ad"]
+        for aid in ids:
+            _write_log(out, aid, 10, 5.0, date="2026-10-16 17:27")
+        assert [e["id"] for e in client.get("/logs").json()["logs"]] == sorted(ids, reverse=True)
 
     def test_trends(self, client, isolated_dirs):
         out = isolated_dirs["output"]
@@ -749,7 +761,7 @@ class TestReport:
         for aid in ("AN-20260101-000000", "AN-20260101-000000-a1b2c3"):
             _write_log(out, aid, 12, 24.0)
             html = client.get(f"/report/{aid}/html").json()["html"]
-            assert aid in html and "UTC" in html and "2.11.0" in html
+            assert aid in html and "UTC" in html and "2.11.1" in html
             assert "data:image/png" not in html
 
     def test_report_kpis_match_trends_and_na(self, client, isolated_dirs):
@@ -853,7 +865,7 @@ def test_uvicorn_style_import_from_web_api_dir(tmp_path):
         cwd=REPO_ROOT / "web" / "api", env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("2.11.0")
+    assert proc.stdout.strip().endswith("2.11.1")
 
 
 def test_import_refused_without_key(tmp_path):

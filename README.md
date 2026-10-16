@@ -2,7 +2,7 @@
 
 Turn the errors you already collect in Sentry into reliability forecasts: MTBF, remaining faults and the failure patterns that drive them.
 
-[![Version](https://img.shields.io/badge/version-2.11.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.11.1-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker Hub](https://img.shields.io/badge/docker-trustaldo%2Freliability--modeler--api-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/trustaldo/reliability-modeler-api)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -86,7 +86,7 @@ docker compose ps        # both services should become "healthy"
 
 Open **http://localhost:3000** and sign in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`. Go to **Sentry**, enter your org and project, then **Pull & Analyze**.
 
-`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.11.0` in `.env`.
+`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.11.1` in `.env`.
 
 ## Architecture
 
@@ -224,7 +224,7 @@ Limits: 256 KB per query, depth 8, at most 10 graph-building fields per request,
 | `list_analyses(limit, offset)` | Archived runs, newest first |
 | `get_trends()` | MTBF and failure-rate trends per source |
 | `list_sentry_projects(org)` | Projects in a Sentry org |
-| `run_analysis(org, project, days)` | A fresh analysis (up to about 4 minutes); plots stripped |
+| `run_analysis(org, project, days, future_hours)` | A fresh analysis (up to about 4 minutes); plots stripped |
 | `graphql(query)` | Read-only failure-graph queries |
 
 Setup, credentials (`RM_URL`, `RM_USERNAME`, `RM_PASSWORD`, `RM_API_KEY`) and client registration: [`mcp_server/README.md`](mcp_server/README.md).

@@ -18,7 +18,7 @@ All commands run from the repository (or deployment) directory containing `docke
 cp .env.example .env && chmod 600 .env
 openssl rand -hex 32          # paste as RELIABILITY_API_KEY
 openssl rand -base64 24       # paste as UI_PASSWORD (or choose one)
-# set SENTRY_AUTH_TOKEN (event:read + project:read) and pin IMAGE_TAG=2.11.0
+# set SENTRY_AUTH_TOKEN (event:read + project:read) and pin IMAGE_TAG=2.11.1
 docker compose pull
 docker compose up -d
 docker compose ps             # wait for api and ui to be "healthy" (about 30 s)
@@ -29,7 +29,7 @@ Verify:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/healthz            # 200
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/                   # 401 (login required)
-curl -s -u admin:"<UI_PASSWORD>" http://localhost:3000/api/health                 # {"status":"ok",...,"version":"2.11.0"}
+curl -s -u admin:"<UI_PASSWORD>" http://localhost:3000/api/health                 # {"status":"ok",...,"version":"2.11.1"}
 ```
 
 `degraded` means `SENTRY_AUTH_TOKEN` is missing. Then open http://localhost:3000, log in, and run a Sentry analysis.

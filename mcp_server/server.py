@@ -125,10 +125,12 @@ def list_sentry_projects(org: str) -> dict:
 
 
 @mcp.tool()
-def run_analysis(org: str, project: str, days: int = 30) -> dict:
+def run_analysis(org: str, project: str, days: int = 30, future_hours: float = 1000) -> dict:
     """Pull the last `days` (1-90) of Sentry error events for a project (or 'all') and fit
-    reliability-growth models. Returns summary, model fits, categorized failures and graph insights."""
-    return _strip(_call("POST", "/ingest/sentry", json={"org": org, "project": project, "days": days}))
+    reliability-growth models, forecasting `future_hours` (1-100000) ahead. Returns summary, model fits,
+    the most recent categorized failures and graph insights; `truncated: true` means Sentry's event cap was hit."""
+    return _strip(_call("POST", "/ingest/sentry",
+                        json={"org": org, "project": project, "days": days, "future_hours": future_hours}))
 
 
 @mcp.tool()

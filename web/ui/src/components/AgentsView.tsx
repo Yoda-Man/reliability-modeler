@@ -27,7 +27,7 @@ const TOOLS: [string, string][] = [
     ['list_analyses', 'Past analysis runs, newest first: ID, date, source, total failures and duration.'],
     ['get_trends', 'Whether reliability is improving, stable or degrading across runs.'],
     ['list_sentry_projects', 'Sentry projects available in an organization.'],
-    ['run_analysis', 'Pulls 1–90 days of Sentry errors and runs a fresh analysis (up to ~2 min).'],
+    ['run_analysis', 'Pulls 1–90 days of Sentry errors and runs a fresh analysis with a chosen forecast horizon (up to ~4 min).'],
     ['graphql', 'Failure graphs, keystone categories and cascade chains (read-only).'],
 ];
 

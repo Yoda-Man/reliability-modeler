@@ -104,7 +104,7 @@ EVENTS = "/api/0/projects/acme/web/events/"
 def test_pagination_follows_cursor(fake, taxonomy):
     fake.route(EVENTS, (200, [_event(0), _event(1)], fake.link(EVENTS, "c1")))
     fake.route(EVENTS, (200, [_event(2, "http 502")], fake.link(EVENTS, "c2", results=False)), cursor="c1")
-    t, cat_list, t0, cats = load_sentry_failures("acme", "web", "tok", taxonomy, days=7, base_url=fake.base)
+    t, cat_list, t0, cats, truncated = load_sentry_failures("acme", "web", "tok", taxonomy, days=7, base_url=fake.base)
     assert list(t) == [0.0, 1.0, 2.0]
     assert [c[2] for c in cat_list] == ["Database", "Database", "Network"]
     assert len(fake.requests) == 2
@@ -117,8 +117,9 @@ def test_max_pages_truncates(fake, taxonomy, monkeypatch, caplog):
     monkeypatch.setattr(sentry, "MAX_PAGES", 2)
     fake.route(EVENTS, (200, [_event(0)], fake.link(EVENTS, "c1")))
     fake.route(EVENTS, (200, [_event(1)], fake.link(EVENTS, "c2")), cursor="c1")
-    t, *_ = load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base)
+    t, *_, truncated = load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base)
     assert len(t) == 2
+    assert truncated is True
     assert "truncated" in caplog.text
 
 
@@ -175,7 +176,7 @@ def test_bad_events_dropped_and_logged(fake, taxonomy, caplog):
 
 def test_no_events(fake, taxonomy):
     fake.route(EVENTS, (200, [], {}))
-    t, cat_list, t0, cats = load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base)
+    t, cat_list, t0, cats, truncated = load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base)
     assert len(t) == 0 and cat_list == [] and cats
 
 
