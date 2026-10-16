@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import LogsView from '@/components/LogsView';
 import ConfigView from '@/components/ConfigView';
+import AgentsView from '@/components/AgentsView';
+import Dashboard from '@/components/Dashboard';
+import SentryView from '@/components/SentryView';
+import TrendsView from '@/components/TrendsView';
+import type { AnalysisResults, CategorizedFailure, TrendRun } from '@/lib/types';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -12,6 +17,13 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+// Recharts' ResponsiveContainer needs ResizeObserver, which jsdom lacks.
+class NoopResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
 
 describe('LogsView', () => {
   it('shows an error state with status and detail on a non-OK response', async () => {
@@ -48,5 +60,128 @@ describe('ConfigView', () => {
       content: 'Net [timeout]',
       settings: { multi_label: false, optimization_method: 'TNC', tolerance: 1e-6 },
     });
+  });
+});
+
+describe('AgentsView', () => {
+  it('shows every client setup and copies a command', async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    render(<AgentsView />);
+    expect(screen.getByText('Claude Code')).toBeTruthy();
+    expect(screen.getByText(/Yodaman, Claude Desktop/)).toBeTruthy();
+    expect(screen.getByText(/mcp_servers\.reliability-modeler/)).toBeTruthy();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Copy to clipboard' })[1]);
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('claude mcp add reliability-modeler'));
+  });
+});
+
+describe('LogsView search', () => {
+  it('says "No matches on this page" instead of the empty-history state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      total: 1,
+      logs: [{ id: 'AN-1', date: '2026-01-01', file: 'sentry:org/web', status: 'Completed', summary: { total_failures: 3, duration_hours: 1 } }],
+    })));
+    render(<LogsView />);
+    await screen.findByText('sentry:org/web');
+    fireEvent.change(screen.getByPlaceholderText('Search this page...'), { target: { value: 'nope' } });
+    expect(screen.getByText('No matches on this page')).toBeTruthy();
+    expect(screen.queryByText('No Analysis History Found')).toBeNull();
+  });
+});
+
+function failures(n: number): CategorizedFailure[] {
+  return Array.from({ length: n }, (_, i) => [
+    new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), i, 'Network', `event-${i}`,
+  ] as CategorizedFailure);
+}
+
+function results(overrides: Partial<AnalysisResults> = {}): AnalysisResults {
+  return {
+    id: 'AN-20260101-000000-abcdef',
+    summary: { total_failures: 500, duration_hours: 100, start_time: '2026-01-01T00:00:00Z' },
+    models: [{ id: 'go', name: 'Goel-Okumoto', aic: 10, total_expected_failures: 520, parameters: {} }],
+    plots: {},
+    categorized_failures: failures(100),
+    categorized_total: 500,
+    future_hours: 1500,
+    truncated: false,
+    ...overrides,
+  };
+}
+
+describe('Dashboard', () => {
+  it('renders without crashing when no model could be fitted', () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    render(<Dashboard data={results({ models: [] })} />);
+    expect(screen.getByRole('status').textContent).toContain('No model could be fitted to this data');
+    expect(screen.getByText('Total Failures')).toBeTruthy();
+    expect(screen.getByText('500')).toBeTruthy();
+  });
+
+  it('lists recent events newest first, captions truncated samples and shows the run horizon', () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    render(<Dashboard data={results({ truncated: true })} />);
+    const events = screen.getAllByText(/^event-\d+$/).map(el => el.textContent);
+    expect(events.length).toBe(50);
+    expect(events[0]).toBe('event-99');
+    expect(events[49]).toBe('event-50');
+    expect(screen.getAllByText('(most recent 100 of 500 events)').length).toBeGreaterThan(0);
+    expect(screen.getByRole('note').textContent).toContain("hit Sentry's event cap");
+    expect(screen.getByText(/Projected 1500h into the future/)).toBeTruthy();
+    expect(screen.queryByRole('slider')).toBeNull();
+  });
+});
+
+describe('SentryView', () => {
+  it('lets the days field be cleared and sends the horizon with the request', async () => {
+    const onAnalyze = vi.fn(async () => undefined);
+    render(<SentryView onAnalyze={onAnalyze} isLoading={false} />);
+    fireEvent.change(screen.getByPlaceholderText('e.g. my-company'), { target: { value: 'acme' } });
+    fireEvent.change(screen.getByPlaceholderText('e.g. web-app'), { target: { value: 'web' } });
+    const days = screen.getByLabelText(/Look-back Window/) as HTMLInputElement;
+    fireEvent.change(days, { target: { value: '' } });
+    expect(days.value).toBe('');
+    fireEvent.click(screen.getByText('Pull & Analyze'));
+    expect((await screen.findByRole('alert')).textContent).toContain('Days must be');
+    expect(onAnalyze).not.toHaveBeenCalled();
+
+    fireEvent.change(days, { target: { value: '7' } });
+    fireEvent.change(screen.getByLabelText(/Forecast Horizon/), { target: { value: '2500' } });
+    fireEvent.click(screen.getByText('Pull & Analyze'));
+    await vi.waitFor(() => expect(onAnalyze).toHaveBeenCalledWith('acme', 'web', 7, 2500));
+  });
+});
+
+describe('TrendsView', () => {
+  const run = (id: string, file: string, mtbf: number): TrendRun => ({
+    id, date: `2026-01-0${id.slice(-1)} 00:00`, file, total_failures: 10, duration_hours: 10, mtbf_hours: mtbf, failure_rate_per_hour: 1 / mtbf,
+  });
+
+  it('shows the trend per source when the response has groups', async () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    const a = [run('r1', 'sentry:org/a', 1), run('r2', 'sentry:org/a', 2)];
+    const b = [run('r3', 'sentry:org/b', 4), run('r4', 'sentry:org/b', 2)];
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      runs: [...a, ...b], trend: 'degrading', mtbf_change_pct: -50, rate_change_pct: 100, num_runs: 2,
+      groups: [
+        { file: 'sentry:org/a', runs: a, trend: 'improving', mtbf_change_pct: 100, rate_change_pct: -50, num_runs: 2 },
+        { file: 'sentry:org/b', runs: b, trend: 'degrading', mtbf_change_pct: -50, rate_change_pct: 100, num_runs: 2 },
+      ],
+    })));
+    render(<TrendsView />);
+    expect(await screen.findByText(/MTBF Degrading/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Source'), { target: { value: 'sentry:org/a' } });
+    expect(screen.getByText(/MTBF Improving/)).toBeTruthy();
+  });
+
+  it('still works when groups is absent', async () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      runs: [run('r1', 'x', 1), run('r2', 'x', 2)], trend: 'improving', mtbf_change_pct: 100, num_runs: 2,
+    })));
+    render(<TrendsView />);
+    expect(await screen.findByText(/MTBF Improving/)).toBeTruthy();
+    expect(screen.queryByLabelText('Source')).toBeNull();
   });
 });

@@ -195,7 +195,7 @@ class TestHealth:
     def test_degraded_without_sentry_token(self, client):
         body = client.get("/health").json()
         assert body["status"] == "degraded"
-        assert body["version"] == "2.9.0"
+        assert body["version"] == "2.11.0"
         assert body["checks"] == {"output_writable": True, "config_readable": True,
                                   "sentry_token_configured": False}
         assert body["timestamp"].endswith("+00:00")
@@ -223,7 +223,7 @@ class TestHealth:
 
     def test_version_single_source(self, api_module):
         import modeler
-        assert api_module.app.version == modeler.__version__ == "2.9.0"
+        assert api_module.app.version == modeler.__version__ == "2.11.0"
 
 
 class TestMetrics:
@@ -286,6 +286,12 @@ class TestConfig:
     ])
     def test_post_invalid_rejected(self, client, payload):
         _assert_detail(client.post("/config", json=payload), 422)
+
+    def test_comma_in_category_name_rejected(self, client, isolated_dirs):
+        before = (isolated_dirs["config"] / "fault_categories.conf").read_text()
+        detail = _assert_detail(client.post("/config", json={"content": "Network, DNS [dns]\n"}), 422)
+        assert "must not contain ','" in detail and "line 1" in detail
+        assert (isolated_dirs["config"] / "fault_categories.conf").read_text() == before
 
     def test_content_max_size(self, client):
         big = "A [b]\n" * 50000  # 300 KB > 256 KiB limit, < 1 MiB body limit
@@ -388,6 +394,54 @@ class TestIngestPipeline:
         gql = client.post("/graphql", json={"query": q}).json()
         assert "errors" not in gql and isinstance(gql["data"]["cascadeChains"], list)
 
+    def test_response_carries_recent_events_total_and_horizon(self, api_module, client, sentry_token,
+                                                               monkeypatch):
+        t, cat, t0, cats = _synthetic_sentry(n=150)
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (t, cat, t0, cats))
+        body = client.post("/ingest/sentry", json={"org": "o", "project": "p", "future_hours": 250}).json()
+        assert body["categorized_total"] == 150
+        assert [list(r) for r in body["categorized_failures"]] == [list(r) for r in cat[-100:]]
+        times = [r[1] for r in body["categorized_failures"]]
+        assert times == sorted(times)  # still oldest -> newest
+        assert body["future_hours"] == 250
+        assert body["truncated"] is False
+
+    def test_no_valid_fit_returns_empty_models(self, api_module, client, sentry_token, monkeypatch):
+        """Evenly spaced events (constant rate) have no reliability-growth fit."""
+        t = np.linspace(0, 720, 100)
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cat = [(t0.isoformat(), float(x), "Database" if i % 2 else "Network", "d") for i, x in enumerate(t)]
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: (t, cat, t0, []))
+        resp = client.post("/ingest/sentry", json={"org": "o", "project": "p"})
+        assert resp.status_code == 200 and resp.json()["models"] == []
+
+    def test_timed_out_analysis_stops_and_is_not_archived(self, api_module, client, sentry_token,
+                                                          monkeypatch, isolated_dirs):
+        release, done, outcome = threading.Event(), threading.Event(), {}
+        real_fit, real_run = api_module.fit_model, api_module._run_analysis
+
+        def slow_fit(*a, **k):
+            release.wait(5)
+            return real_fit(*a, **k)
+
+        def tracked_run(*a, **k):
+            try:
+                outcome["result"] = real_run(*a, **k)
+            finally:
+                done.set()
+
+        monkeypatch.setattr(api_module, "load_sentry_failures", lambda *a, **k: _synthetic_sentry())
+        monkeypatch.setattr(api_module, "fit_model", slow_fit)
+        monkeypatch.setattr(api_module, "_run_analysis", tracked_run)
+        monkeypatch.setattr(api_module, "ANALYSIS_TIMEOUT_SECONDS", 0.3)
+        assert "timed out" in _assert_detail(client.post("/ingest/sentry", json={"org": "o", "project": "p"}), 504)
+        release.set()
+        assert done.wait(10)
+        assert outcome["result"] is None
+        out = isolated_dirs["output"]
+        for sub in ("logs", "analyses", "plots"):
+            assert not (out / sub).exists() or list((out / sub).iterdir()) == [], sub
+
     def test_ids_are_unique(self, api_module):
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         ids = {api_module.new_analysis_id(now) for _ in range(200)}
@@ -397,11 +451,20 @@ class TestIngestPipeline:
     def test_all_projects(self, api_module, client, sentry_token, monkeypatch):
         def fake_all(org, token, config_path, days, multi_label, cancel_event=None):
             t, cat, t0, cats = _synthetic_sentry(multi=True)
-            return t, cat, t0, cats, {"api": 10, "web": 30}
+            return t, cat, t0, cats, {"api": 10, "web": 30}, False
 
         monkeypatch.setattr(api_module, "load_sentry_failures_all", fake_all)
         body = client.post("/ingest/sentry", json={"org": "acme", "project": "all"}).json()
         assert list(body["projects"].items()) == [("web", 30), ("api", 10)]
+        assert body["truncated"] is False
+
+    def test_all_projects_truncated_flag(self, api_module, client, sentry_token, monkeypatch):
+        def fake_all(org, token, config_path, days, multi_label, cancel_event=None):
+            t, cat, t0, cats = _synthetic_sentry()
+            return t, cat, t0, cats, {"api": 40}, True
+
+        monkeypatch.setattr(api_module, "load_sentry_failures_all", fake_all)
+        assert client.post("/ingest/sentry", json={"org": "acme", "project": "all"}).json()["truncated"] is True
 
     def test_no_events(self, api_module, client, sentry_token, monkeypatch):
         monkeypatch.setattr(api_module, "load_sentry_failures",
@@ -504,7 +567,7 @@ class TestIngestPipeline:
         def flaky(t, T, model_name, **k):
             if model_name == "go":
                 raise ValueError("bad fit")
-            return None, None, None, None
+            return None, None, None
         monkeypatch.setattr(api_module, "fit_model", flaky)
         body = client.post("/ingest/sentry", json={"org": "o", "project": "p"}).json()
         assert body["models"] == []
@@ -545,11 +608,12 @@ class TestSentryProjects:
 
 # ── Logs / prune / trends ────────────────────────────────────────────────────
 
-def _write_log(output_dir: Path, log_id: str, tf: int, dh: float, date="2026-01-01 00:00", mtime=None):
+def _write_log(output_dir: Path, log_id: str, tf: int, dh: float, date="2026-01-01 00:00", mtime=None,
+               file="sentry://x"):
     d = output_dir / "logs"
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{log_id}.json"
-    p.write_text(json.dumps({"id": log_id, "date": date, "file": "sentry://x", "status": "Completed",
+    p.write_text(json.dumps({"id": log_id, "date": date, "file": file, "status": "Completed",
                              "summary": {"total_failures": tf, "duration_hours": dh}}))
     if mtime is not None:
         os.utime(p, (mtime, mtime))
@@ -573,7 +637,7 @@ class TestLogsAndTrends:
 
     def test_trends(self, client, isolated_dirs):
         out = isolated_dirs["output"]
-        assert client.get("/trends").json() == {"runs": [], "trend": "insufficient_data"}
+        assert client.get("/trends").json() == {"groups": [], "runs": [], "trend": "insufficient_data"}
         _write_log(out, "AN-20260101-000000", 10, 10.0, mtime=1000)
         assert client.get("/trends").json()["trend"] == "single_run"
         _write_log(out, "AN-20260102-000000", 5, 10.0, mtime=2000)
@@ -583,6 +647,27 @@ class TestLogsAndTrends:
         assert client.get("/trends").json()["trend"] == "degrading"
         _write_log(out, "AN-20260104-000000", 10, 10.0, mtime=4000)
         assert client.get("/trends").json()["trend"] == "stable"
+
+    def test_trends_grouped_by_source(self, client, isolated_dirs):
+        out = isolated_dirs["output"]
+        _write_log(out, "AN-20260101-000000", 10, 10.0, mtime=1000, file="sentry://o/web (30d)")
+        _write_log(out, "AN-20260102-000000", 100, 10.0, mtime=2000, file="sentry://o/api (30d)")
+        _write_log(out, "AN-20260103-000000", 5, 10.0, mtime=3000, file="sentry://o/web (30d)")
+        _write_log(out, "AN-20260104-000000", 1, 10.0, mtime=4000, file="sentry://o/web (30d)")  # <2 failures
+        body = client.get("/trends").json()
+        assert [g["file"] for g in body["groups"]] == ["sentry://o/web (30d)", "sentry://o/api (30d)"]
+        web, api = body["groups"]
+        assert web["trend"] == "improving" and web["num_runs"] == 2 and web["mtbf_change_pct"] == 100.0
+        assert api["trend"] == "single_run" and api["num_runs"] == 1
+        # top-level keys describe the most recent run's group, not web-vs-api
+        assert body["trend"] == "improving" and body["num_runs"] == 2
+        assert len(body["runs"]) == 3
+
+    def test_mtbf_helper(self, api_module):
+        assert api_module._mtbf_and_rate(10, 20.0) == (2.0, 0.5)
+        assert api_module._mtbf_and_rate(1, 20.0) == (None, None)
+        assert api_module._mtbf_and_rate(10, 0) == (None, None)
+        assert api_module._mtbf_and_rate("x", 5) == (None, None)
 
     def test_prune(self, api_module, client, isolated_dirs):
         out = isolated_dirs["output"]
@@ -664,8 +749,17 @@ class TestReport:
         for aid in ("AN-20260101-000000", "AN-20260101-000000-a1b2c3"):
             _write_log(out, aid, 12, 24.0)
             html = client.get(f"/report/{aid}/html").json()["html"]
-            assert aid in html and "UTC" in html and "2.9.0" in html
+            assert aid in html and "UTC" in html and "2.11.0" in html
             assert "data:image/png" not in html
+
+    def test_report_kpis_match_trends_and_na(self, client, isolated_dirs):
+        out = isolated_dirs["output"]
+        _write_log(out, "AN-20260101-000000", 12, 24.0)
+        html = client.get("/report/AN-20260101-000000/html").json()["html"]
+        assert ">2.00h<" in html and ">0.50/h<" in html
+        _write_log(out, "AN-20260102-000000", 1, 0.0)
+        html = client.get("/report/AN-20260102-000000/html").json()["html"]
+        assert html.count('class="value">n/a<') == 2 and html.count("<strong>n/a</strong>") == 2
 
 
 # ── GraphQL ──────────────────────────────────────────────────────────────────
@@ -759,7 +853,7 @@ def test_uvicorn_style_import_from_web_api_dir(tmp_path):
         cwd=REPO_ROOT / "web" / "api", env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("2.9.0")
+    assert proc.stdout.strip().endswith("2.11.0")
 
 
 def test_import_refused_without_key(tmp_path):

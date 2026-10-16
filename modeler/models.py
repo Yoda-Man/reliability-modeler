@@ -1,6 +1,6 @@
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,83 +41,111 @@ def mo_intensity(t, params):
     return lambda0 / (1 + lambda0 * theta * t)
 
 
-def numerical_hessian(fun, x, args=(), eps=1e-5):
-    n = len(x)
-    H = np.zeros((n, n))
-    f0 = fun(x, *args)
-    for i in range(n):
-        x1 = x.copy(); x1[i] += eps
-        x2 = x.copy(); x2[i] -= eps
-        f1 = fun(x1, *args)
-        f2 = fun(x2, *args)
-        H[i,i] = (f1 - 2*f0 + f2) / (eps**2)
-        for j in range(i+1, n):
-            x11 = x.copy(); x11[i] += eps; x11[j] += eps
-            x12 = x.copy(); x12[i] += eps; x12[j] -= eps
-            x21 = x.copy(); x21[i] -= eps; x21[j] += eps
-            x22 = x.copy(); x22[i] -= eps; x22[j] -= eps
-            f11 = fun(x11, *args)
-            f12 = fun(x12, *args)
-            f21 = fun(x21, *args)
-            f22 = fun(x22, *args)
-            H[i,j] = H[j,i] = (f11 - f12 - f21 + f22) / (4 * eps**2)
-    return H
+# Search ranges for the profiled shape parameter, expressed as multiples of 1/T
+# (b for GO, beta = lambda0*theta for MO). Both are searched in log space.
+_SHAPE_RANGE = (1e-6, 1e6)
+# A fit whose optimum lies within this fraction of the (log-space) search range
+# of a bound is a boundary solution, i.e. there is no finite interior MLE.
+_BOUNDARY_FRACTION = 0.01
+
+
+def _near_bound(x, lo, hi):
+    margin = _BOUNDARY_FRACTION * (hi - lo)
+    return x <= lo + margin or x >= hi - margin
+
+
+def go_profile_negloglik(log_b, t, T):
+    """Negative GO log-likelihood (per event) with ``a`` profiled out.
+
+    For fixed b the MLE of a is n / (1 - exp(-b*T)), which turns the 2-D
+    problem into a 1-D one over log(b).
+    """
+    n = len(t)
+    b = np.exp(log_b)
+    a = n / -np.expm1(-b * T)
+    return -go_loglik([a, b], t, T) / n
+
+
+def mo_profile_negloglik(log_beta, t, T):
+    """Negative MO log-likelihood (per event) with theta profiled out.
+
+    Writing beta = lambda0*theta, the MLE of theta for fixed beta is
+    log(1 + beta*T) / n, so only log(beta) has to be searched.
+    """
+    n = len(t)
+    beta = np.exp(log_beta)
+    theta = np.log1p(beta * T) / n
+    return -mo_loglik([beta / theta, theta], t, T) / n
 
 
 def fit_model(t, T, model_name='go', method='L-BFGS-B', tol=1e-10, maxiter=5000):
+    """Maximum-likelihood fit of the GO or MO NHPP model.
+
+    Returns ``(params, loglik, total_expected)``, or ``(None, None, None)``
+    when no valid fit exists: fewer than 3 events, ``T <= 0``, a mean event
+    time of at least T/2 (no reliability growth), or an optimum that lies on the boundary of the search
+    range (no reliability growth / degenerate data).
+
+    GO is solved exactly: ``a`` is profiled out analytically and log(b) is
+    found with a bounded 1-D search, so ``method``/``tol`` do not apply.
+    MO profiles out theta analytically and searches log(lambda0*theta) with
+    the chosen scipy ``method`` and ``tol``.
+    """
+    t = np.asarray(t, dtype=float)
     n = len(t)
+    none = (None, None, None)
     if n < 3:
         logger.warning("Not enough data points to fit model (n < 3).")
-        return None, None, None, None
+        return none
+    if not np.isfinite(T) or T <= 0:
+        logger.warning("Cannot fit %s model: observation period T=%s is not positive.", model_name, T)
+        return none
 
+    # Both models have a decreasing intensity. When the mean event time is at
+    # least T/2 the data show no reliability growth: the GO likelihood has no
+    # finite maximum and the MO optimum collapses onto the constant-rate
+    # boundary (the profile likelihood's slope at beta=0 is n*(T/2 - mean t)).
+    if np.mean(t) / T >= 0.5:
+        logger.warning("No valid %s fit: failure rate is not decreasing (mean t / T >= 0.5).", model_name)
+        return none
+
+    lo, hi = np.log(_SHAPE_RANGE[0] / T), np.log(_SHAPE_RANGE[1] / T)
     if model_name == 'go':
+        res = minimize_scalar(go_profile_negloglik, bounds=(lo, hi), args=(t, T),
+                              method='bounded', options={'xatol': 1e-10, 'maxiter': maxiter})
+        x = float(res.x)
+        b = np.exp(x)
+        params = np.array([n / -np.expm1(-b * T), b])
         loglik_func = go_loglik
-        initials = [[n*1.2, 0.05], [n*1.5, 0.03], [n*2.0, 0.08], [n*1.1, 0.2], [n*3.0, 0.1]]
-        bounds = [(max(1, n*0.5), None), (1e-6, None)]
-        mu_func = go_mu
     else:
+        # TNC names its iteration cap 'maxfun'; the other supported solvers use 'maxiter'.
+        options = {'maxfun': maxiter} if method == 'TNC' else {'maxiter': maxiter}
+        best = None
+        for x0 in np.log(np.array([1e-3, 1e-1, 1e1, 1e3]) / T):
+            res = minimize(lambda x: mo_profile_negloglik(x[0], t, T), [x0], bounds=[(lo, hi)],
+                           method=method, tol=tol, options=options)
+            if np.isfinite(res.fun) and (best is None or res.fun < best.fun):
+                best = res
+        if best is None:
+            logger.warning("Failed to fit mo model.")
+            return none
+        x = float(best.x[0])
+        beta = np.exp(x)
+        theta = np.log1p(beta * T) / n
+        params = np.array([beta / theta, theta])
         loglik_func = mo_loglik
-        lambda0_guess = n / T * np.array([0.5, 1.0, 2.0, 3.0]) if T > 0 else np.array([10,50,100])
-        theta_guess = np.array([0.005, 0.01, 0.05, 0.1, 0.2])
-        initials = [[l0, th] for l0 in lambda0_guess for th in theta_guess]
-        bounds = [(1e-6,None), (1e-6,None)]
-        mu_func = mo_mu
 
-    # TNC names its iteration cap 'maxfun'; the other supported solvers use 'maxiter'.
-    options = {'maxfun': maxiter} if method == 'TNC' else {'maxiter': maxiter}
-    best_ll, best_params = -np.inf, None
-    for x0 in initials:
-        res = minimize(lambda p: -loglik_func(p, t, T), x0, bounds=bounds,
-                       method=method, tol=tol, options=options)
-        if res.success:
-            ll = loglik_func(res.x, t, T)
-            if ll > best_ll:
-                best_ll = ll
-                best_params = res.x
-
-    if best_params is None:
-        logger.warning(f"Failed to fit {model_name} model.")
-        return None, None, None, None
-
-    try:
-        neg_ll = lambda p: -loglik_func(p, t, T)
-        H = numerical_hessian(neg_ll, best_params, args=(t, T))
-        try:
-            cov = np.linalg.inv(H)
-        except np.linalg.LinAlgError:
-            logger.debug(f"Hessian singular for {model_name}, using pseudo-inverse")
-            cov = np.linalg.pinv(H)
-        se = np.sqrt(np.abs(np.diag(cov)))
-    except Exception as e:
-        logger.debug(f"Hessian calculation failed for {model_name}: {e}")
-        se = np.full(len(best_params), np.nan)
+    ll = loglik_func(params, t, T)
+    if not np.all(np.isfinite(params)) or not np.isfinite(ll) or _near_bound(x, lo, hi):
+        logger.warning("No valid %s fit: optimum is on the boundary of the parameter space.", model_name)
+        return none
 
     if model_name == 'go':
-        total_expected = best_params[0]
+        total_expected = params[0]
     else:
         # Use a large time to approximate asymptotic total. For MO model,
         # mu(inf) = (1/theta) * ln(1 + lambda0 * theta * inf) is unbounded,
         # so we use a practical horizon of 1e6 hours (~114 years).
-        total_expected = mo_mu(1e6, best_params)
+        total_expected = mo_mu(1e6, params)
 
-    return best_params, best_ll, se, total_expected
+    return params, float(ll), float(total_expected)

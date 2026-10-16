@@ -5,14 +5,16 @@ import { Bug, Loader2, Search, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { formatError } from '@/lib/api';
 
 interface SentryViewProps {
-    onAnalyze: (org: string, project: string, days: number) => Promise<void>;
+    onAnalyze: (org: string, project: string, days: number, futureHours: number) => Promise<void>;
     isLoading: boolean;
 }
 
 export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
     const [org, setOrg] = useState('');
     const [project, setProject] = useState('');
-    const [days, setDays] = useState(30);
+    // Kept as raw strings so the fields can be cleared while typing; parsed on submit.
+    const [days, setDays] = useState('30');
+    const [futureHours, setFutureHours] = useState('1000');
     const [analyzeAll, setAnalyzeAll] = useState(false);
     const [error, setError] = useState('');
 
@@ -27,12 +29,18 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
             setError('Enter a project slug or enable "Analyze all projects".');
             return;
         }
-        if (days < 1 || days > 90) {
-            setError('Days must be between 1 and 90.');
+        const daysNum = Number(days.trim());
+        if (!days.trim() || !Number.isInteger(daysNum) || daysNum < 1 || daysNum > 90) {
+            setError('Days must be a whole number between 1 and 90.');
+            return;
+        }
+        const hoursNum = Number(futureHours.trim());
+        if (!futureHours.trim() || !Number.isFinite(hoursNum) || hoursNum < 1 || hoursNum > 100000) {
+            setError('Forecast horizon must be between 1 and 100000 hours.');
             return;
         }
         try {
-            await onAnalyze(org.trim(), analyzeAll ? 'all' : project.trim(), days);
+            await onAnalyze(org.trim(), analyzeAll ? 'all' : project.trim(), daysNum, hoursNum);
         } catch (err) {
             setError(formatError(err) || 'Failed to pull data from Sentry.');
         }
@@ -94,17 +102,34 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
                     </label>
 
                     <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
+                        <label htmlFor="sentry-days" className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
                             Look-back Window (days)
                         </label>
                         <input
+                            id="sentry-days"
                             type="number"
                             min={1}
                             max={90}
                             value={days}
-                            onChange={(e) => setDays(parseInt(e.target.value) || 30)}
+                            onChange={(e) => setDays(e.target.value)}
                             className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
                         />
+                    </div>
+
+                    <div>
+                        <label htmlFor="sentry-future-hours" className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
+                            Forecast Horizon (hours)
+                        </label>
+                        <input
+                            id="sentry-future-hours"
+                            type="number"
+                            min={1}
+                            max={100000}
+                            value={futureHours}
+                            onChange={(e) => setFutureHours(e.target.value)}
+                            className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
+                        />
+                        <p className="mt-1 text-xs text-slate-500">How far ahead the reliability models project.</p>
                     </div>
 
                     <button

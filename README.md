@@ -2,7 +2,7 @@
 
 A **Sentry-powered** web application that turns your existing error-monitoring data into reliability intelligence. It fits the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models to Sentry failure events to estimate MTBF, residual faults and release readiness.
 
-Current version: **2.9.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
+Current version: **2.11.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
 
 > **Internal network only.** The application is designed to run behind your organisation's network boundary or VPN. It has authentication (API key + UI login) but is not hardened as an internet-facing service.
 
@@ -19,7 +19,7 @@ Current version: **2.9.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
 
 ## Quick start (Docker)
 
-Requirements: Docker Engine 24+ with the Compose plugin.
+Requirements: Docker Engine 24+ with the Compose plugin, and at least 1 vCPU (see `API_CPUS` / `UI_CPUS`).
 
 ```bash
 cp .env.example .env
@@ -38,7 +38,7 @@ Open **http://localhost:3000** and log in with `UI_USERNAME` (default `admin`) a
 
 `docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing.
 
-To run a specific release, set `IMAGE_TAG` (e.g. `IMAGE_TAG=2.9.0`) in `.env`. Operations procedures (upgrade, rollback, backup, secret rotation) are in [`RUNBOOK.md`](RUNBOOK.md).
+To run a specific release, set `IMAGE_TAG` (e.g. `IMAGE_TAG=2.11.0`) in `.env`. Operations procedures (upgrade, rollback, backup, secret rotation) are in [`RUNBOOK.md`](RUNBOOK.md).
 
 ## Architecture
 
@@ -105,7 +105,8 @@ The browser never talks to the API directly and never sees the API key: the UI p
 | `UI_USERNAME` | no | `admin` | Login username |
 | `API_URL` | no | `http://api:8000` in compose | Where the proxy forwards `/api/*` (server-side only) |
 | `RELIABILITY_API_KEY` | **yes** | none | Injected by the proxy; must match the API |
-| `PROXY_TIMEOUT_MS` | no | `130000` | Proxy timeout; keep above `ANALYSIS_TIMEOUT_SECONDS` |
+| `PROXY_TIMEOUT_MS` | no | `250000` | Proxy timeout; must cover the Sentry fetch plus `ANALYSIS_TIMEOUT_SECONDS` |
+| `TRUST_PROXY` | no | `false` | `true` only behind a reverse proxy that sets `X-Forwarded-For`; otherwise client-supplied `X-Forwarded-For` is ignored |
 | `UI_AUTH_DISABLED` | no | `false` | Local development only |
 
 ### Compose / release
@@ -115,7 +116,10 @@ The browser never talks to the API directly and never sees the API key: the UI p
 | `IMAGE_TAG` | `latest` | Image tag to run; pin in production, change to roll back |
 | `DOCKERHUB_NAMESPACE` | `trustaldo` | Image namespace |
 | `UI_PORT` | `3000` | Host port for the UI |
-| `DOCKERHUB_USERNAME` | `trustaldo` | Used by `make push` |
+| `API_CPUS` / `UI_CPUS` | `1` / `1` | CPU limit per container; must not exceed the host's CPU count (1 vCPU minimum) |
+| `API_MEMORY` / `UI_MEMORY` | `1g` / `512m` | Memory limit per container |
+
+`make push` does not read `.env`; choose the Docker Hub namespace on the command line: `make push DOCKERHUB_USERNAME=<you>` (default `trustaldo`).
 
 [`.env.example`](.env.example) documents every variable.
 
@@ -134,7 +138,7 @@ All routes except `/health` and `/health/live` need `X-API-Key`. Errors are JSON
 | POST | `/config` | Update fault taxonomy and settings |
 | GET | `/logs` | Paginated analysis archive |
 | POST | `/logs/prune` | Delete archives older than N days |
-| GET | `/trends` | Cross-run MTBF/failure-rate comparison |
+| GET | `/trends` | Cross-run MTBF/failure-rate comparison, grouped per source (`groups`) |
 | GET | `/report/{id}/html` | Self-contained HTML executive report |
 | POST | `/graphql` | Failure-graph queries over persisted analyses |
 
@@ -166,7 +170,7 @@ Python 3.13 and Node 22 (the versions the images use).
 ```bash
 # Python
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -r web/api/requirements.txt -r requirements.txt -r requirements-dev.txt
+pip install -r requirements-dev.txt   # pulls in web/api/requirements.txt
 
 # API (runs from web/api; CONFIG_DIR/OUTPUT_DIR default to the repo root / ./output)
 cd web/api
@@ -195,6 +199,7 @@ CI (`.github/workflows/test.yml`) runs unit tests with a 75% coverage floor, API
 - [`USER_MANUAL.md`](USER_MANUAL.md): end-user guide
 - [`SUPPORT.md`](SUPPORT.md): architecture, monitoring, troubleshooting, capacity
 - [`RUNBOOK.md`](RUNBOOK.md): deploy, upgrade, rollback, rotation, backup/restore, incidents
+- [`mcp_server/README.md`](mcp_server/README.md): MCP server that feeds failure data to AI agents (Claude Code, Codex, Yodaman)
 
 ## Ownership
 

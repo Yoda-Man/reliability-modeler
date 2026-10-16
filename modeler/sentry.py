@@ -306,8 +306,13 @@ def _fetch_project_events(
     base_url: str,
     days: int,
     cancel_event: Optional[threading.Event] = None,
-) -> List[dict]:
-    """Fetch raw event dicts for a single project, with pagination."""
+) -> Tuple[List[dict], bool]:
+    """Fetch raw event dicts for a single project, with pagination.
+
+    Returns (events, truncated); ``truncated`` is True when the MAX_PAGES cap
+    was hit, i.e. the oldest events in the window were not fetched (Sentry
+    returns newest first).
+    """
     org = _validate_slug(org, "org")
     project = _validate_slug(project, "project")
     base = base_url.rstrip("/")
@@ -322,7 +327,7 @@ def _fetch_project_events(
     events, truncated = _paginate(url, auth_token, MAX_PAGES, "project", cancel_event)
     if truncated:
         logger.warning("Sentry: %s hit MAX_PAGES (%d) — results truncated.", project, MAX_PAGES)
-    return events
+    return events, truncated
 
 
 def _normalize_raw_events(
@@ -376,7 +381,7 @@ def load_sentry_failures(
     failures and SentryCancelled if ``cancel_event`` is set mid-fetch.
     """
     fault_categories = load_fault_categories(config_path)
-    all_events = _fetch_project_events(org, project, auth_token, _base_url(base_url), days, cancel_event)
+    all_events, _ = _fetch_project_events(org, project, auth_token, _base_url(base_url), days, cancel_event)
 
     if not all_events:
         logger.warning("Sentry: no events found for %s/%s in last %d days", org, project, days)
@@ -397,14 +402,20 @@ def load_sentry_failures_all(
     base_url: Optional[str] = None,
     max_projects: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
-) -> Tuple[np.ndarray, List[Tuple], datetime, list, Dict[str, int]]:
+) -> Tuple[np.ndarray, List[Tuple], datetime, list, Dict[str, int], bool]:
     """
     Pull failure events from ALL projects in an org and aggregate them into a
     single system-wide timeline. Returns:
-        (t_hours, cat_list, t0, fault_categories, project_counts)
+        (t_hours, cat_list, t0, fault_categories, project_counts, truncated)
 
     project_counts maps project name -> number of failure events, for a
     per-project breakdown. Each event description is tagged with its project.
+
+    Each project is capped at MAX_PAGES * PAGE_SIZE events (newest first). If
+    any project hit the cap, its history starts later than the others', which
+    would skew the merged timeline; so every project is trimmed to start at
+    the latest "oldest kept event" among the truncated projects, and
+    ``truncated`` is True.
     """
     fault_categories = load_fault_categories(config_path)
     base = _base_url(base_url)
@@ -419,10 +430,10 @@ def load_sentry_failures_all(
 
     if not projects:
         logger.warning("Sentry: no projects found in org '%s'", org)
-        return np.array([]), [], datetime.now(timezone.utc), fault_categories, {}
+        return np.array([]), [], datetime.now(timezone.utc), fault_categories, {}, False
 
-    all_raw: List[Tuple[datetime, str]] = []
-    project_counts: Dict[str, int] = {}
+    per_project: List[Tuple[str, List[Tuple[datetime, str]]]] = []
+    cutoff: Optional[datetime] = None
 
     for p in projects:
         _check_cancelled(cancel_event)
@@ -431,7 +442,7 @@ def load_sentry_failures_all(
             continue
         name = p.get("name") or slug
         try:
-            events = _fetch_project_events(org, slug, auth_token, base, days, cancel_event)
+            events, project_truncated = _fetch_project_events(org, slug, auth_token, base, days, cancel_event)
         except SentryCancelled:
             raise
         except SentryError as e:
@@ -439,15 +450,29 @@ def load_sentry_failures_all(
             continue
 
         raw = _events_to_raw(events, f"{org}/{slug}", tag=name)
+        per_project.append((name, raw))
+        if project_truncated and raw:
+            oldest = min(dt for dt, _ in raw)
+            cutoff = oldest if cutoff is None else max(cutoff, oldest)
+        logger.info("Sentry: %s (%s) -> %d events", name, slug, len(raw))
+
+    if cutoff is not None:
+        logger.warning("Sentry: event cap hit in org '%s'; trimming every project's events to "
+                       "start at %s so the merged timeline is not skewed", org, cutoff.isoformat())
+    all_raw: List[Tuple[datetime, str]] = []
+    project_counts: Dict[str, int] = {}
+    for name, raw in per_project:
+        if cutoff is not None:
+            raw = [ev for ev in raw if ev[0] >= cutoff]
         all_raw.extend(raw)
         project_counts[name] = len(raw)
-        logger.info("Sentry: %s (%s) -> %d events", name, slug, len(raw))
+    truncated = cutoff is not None
 
     if not all_raw:
         logger.warning("Sentry: no events across %d projects in %s", len(projects), org)
-        return np.array([]), [], datetime.now(timezone.utc), fault_categories, project_counts
+        return np.array([]), [], datetime.now(timezone.utc), fault_categories, project_counts, truncated
 
     t_hours, cat_list, t0 = _normalize_raw_events(all_raw, fault_categories, multi_label)
     logger.info("Sentry: aggregated %d events across %d projects in %s",
                 len(cat_list), len(project_counts), org)
-    return t_hours, cat_list, t0, fault_categories, project_counts
+    return t_hours, cat_list, t0, fault_categories, project_counts, truncated

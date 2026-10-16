@@ -5,6 +5,51 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] - 2026-10-16
+
+Fixes from the full-repo audit.
+
+### Fixed — model accuracy
+- **Goel-Okumoto fit stopped at its starting guess** on large data (L-BFGS-B returned a = 1.1·n; ~7% error in expected total failures, AIC off by >1,100). GO now profiles out `a` exactly and searches `b` in 1-D; MO profiles out θ. All solvers now reach the optimum.
+- **Impossible fits are no longer reported.** No fit for zero time span, a parameter on its search bound, or no reliability growth (mean event time ≥ T/2). `models` can be empty; the Dashboard shows "No model could be fitted" instead of crashing.
+- Standard errors removed (the calculation never worked and nothing used them).
+
+### Fixed — stability and data
+- "All projects" graph build no longer runs out of memory (120k events: +944 MB → +35 MB).
+- GraphQL cache bounded by total events; disk reads no longer fill memory; max 10 graph-building fields per request.
+- A timed-out analysis now stops and is not archived.
+- Per-project Sentry event cap no longer skews merged timelines; response carries `truncated`.
+- `restore.sh` verifies the whole archive and stages extraction before touching live volumes (a truncated backup used to wipe data). Backups are created mode 0600.
+- Release workflow runs only from `main` or a matching `v*` tag, after the test suite.
+
+### Fixed — correctness of displayed numbers
+- `/trends` groups runs per source (`groups`); top-level keys describe the most recent source.
+- Time-proximity graph weights stay within 0–1; insight text counts real neighbours.
+- HTML report and trends share one MTBF/rate calculation ("n/a" for < 2 failures or zero duration).
+- Dashboard: "Recent" events are the newest 100 (`categorized_total` gives the full count), charts say when they show a sample, MTBF trend no longer vanishes on large runs.
+- Forecast horizon moved into the Sentry form; the Dashboard shows the horizon actually used (`future_hours`).
+- Category names containing commas are rejected.
+
+### Security
+- Next.js no longer buffers 10 MB of unauthenticated uploads (cap 1 MiB); chunked POSTs without Content-Length get 411.
+- Client-supplied `X-Forwarded-For` is ignored unless `TRUST_PROXY=true`.
+- MCP server never sends the local `.env` login to a different `RM_URL`.
+
+### Changed
+- Compose CPU/memory limits configurable (`API_CPUS`, `UI_CPUS`, `API_MEMORY`, `UI_MEMORY`); API default 1 CPU (was 2) so it starts on 1-vCPU hosts.
+- Proxy timeout 250 s, browser 260 s, MCP client 260 s.
+- MCP server honours `UI_PORT` and strips inline `.env` comments like compose.
+- Removed unused UI controls, `clsx`/`tailwind-merge`, `run_unit_tests.sh/.bat`; root `requirements.txt` now includes `web/api/requirements.txt`.
+
+## [2.10.0] - 2026-10-16
+
+### Added
+- **MCP server** (`mcp_server/`): feeds failure data to AI agents (Claude Code, Codex, Yodaman, any MCP client) over stdio. Five tools: `list_analyses`, `get_trends`, `list_sentry_projects`, `run_analysis`, `graphql` (read-only). Wraps the running stack through the UI proxy, reading the UI login from the repo `.env`; no secrets in agent configs. Plots and raw graph dumps are stripped from results.
+- **"AI Agents (MCP)" page in the UI** with copyable setup steps for each client.
+- CI job running the MCP server tests.
+
+No breaking changes; upgrade by setting `IMAGE_TAG=2.10.0`.
+
 ## [2.9.0] - 2026-10-10
 
 Production-readiness release. **Contains breaking changes**; read "Upgrade notes" and RUNBOOK.md section 2 before upgrading.

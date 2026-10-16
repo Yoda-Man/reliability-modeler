@@ -4,11 +4,30 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Minus, Loader2, BarChart3 } from 'lucide-react';
 import { apiJson } from '@/lib/api';
-import type { TrendsResponse } from '@/lib/types';
+import type { TrendRun, TrendsResponse, TrendDirection } from '@/lib/types';
 import ErrorState from './ErrorState';
 
 function formatNumber(value: unknown): string {
     return typeof value === 'number' ? value.toFixed(4) : String(value ?? '');
+}
+
+interface TrendView {
+    file: string | null;
+    runs: TrendRun[];
+    trend: TrendDirection;
+    mtbf_change_pct?: number;
+    num_runs: number;
+}
+
+/** The per-source group to show (selected, else the most recent run's), or the whole response when `groups` is absent. */
+function pickView(data: TrendsResponse, selected: string | null): TrendView {
+    const groups = data.groups ?? [];
+    if (groups.length > 0) {
+        const latestFile = data.runs[data.runs.length - 1]?.file;
+        const g = groups.find(x => x.file === selected) ?? groups.find(x => x.file === latestFile) ?? groups[0];
+        return { file: g.file, runs: g.runs, trend: g.trend, mtbf_change_pct: g.mtbf_change_pct, num_runs: g.num_runs ?? g.runs.length };
+    }
+    return { file: null, runs: data.runs, trend: data.trend, mtbf_change_pct: data.mtbf_change_pct, num_runs: data.num_runs ?? data.runs.length };
 }
 
 export default function TrendsView() {
@@ -17,6 +36,7 @@ export default function TrendsView() {
     const [error, setError] = useState<unknown>(null);
 
     const [reloadKey, setReloadKey] = useState(0);
+    const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
     useEffect(() => {
         let cancelled = false;
@@ -42,9 +62,11 @@ export default function TrendsView() {
         setReloadKey(k => k + 1);
     };
 
+    const view = useMemo(() => (data?.runs ? pickView(data, selectedFile) : null), [data, selectedFile]);
+
     const chartData = useMemo(() => {
-        if (!data?.runs) return [];
-        return data.runs.map((r, i) => ({
+        if (!view) return [];
+        return view.runs.map((r, i) => ({
             index: i + 1,
             label: r.date?.slice(0, 16) || `Run ${i + 1}`,
             mtbf: r.mtbf_hours,
@@ -52,7 +74,7 @@ export default function TrendsView() {
             totalFailures: r.total_failures,
             file: r.file,
         }));
-    }, [data]);
+    }, [view]);
 
     if (isLoading) {
         return (
@@ -72,43 +94,70 @@ export default function TrendsView() {
         );
     }
 
-    if (!data || (data.num_runs ?? data.runs.length) < 2) {
+    const groups = data?.groups ?? [];
+    const sourceSelector = groups.length > 1 && view ? (
+        <label className="flex items-center space-x-2 text-xs text-slate-400">
+            <span>Source</span>
+            <select
+                aria-label="Source"
+                value={view.file ?? ''}
+                onChange={(e) => setSelectedFile(e.target.value)}
+                className="px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm text-slate-300 focus:outline-none focus:border-blue-500"
+            >
+                {groups.map(g => (
+                    <option key={g.file} value={g.file}>{g.file} ({g.num_runs ?? g.runs.length} runs)</option>
+                ))}
+            </select>
+        </label>
+    ) : null;
+
+    if (!data || !view || view.num_runs < 2) {
         return (
             <div className="max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-700">
-                <h2 className="text-3xl font-bold text-white mb-6 tracking-tight">Reliability Trends</h2>
+                <div className="flex items-center justify-between mb-6 gap-4">
+                    <h2 className="text-3xl font-bold text-white tracking-tight">Reliability Trends</h2>
+                    {sourceSelector}
+                </div>
                 <div className="p-12 rounded-2xl bg-slate-900/50 border border-slate-800 backdrop-blur-xl text-center">
                     <BarChart3 className="w-16 h-16 text-slate-800 mx-auto mb-6" />
                     <h4 className="text-white font-semibold mb-2 text-lg">Insufficient Data</h4>
                     <p className="text-sm text-slate-500 max-w-sm mx-auto">
-                        Run at least 2 analyses to see MTBF and failure rate trends over time.
-                        Each analysis is automatically archived in the Logs.
+                        {view?.file
+                            ? 'Run at least 2 analyses of this source to see MTBF and failure rate trends over time.'
+                            : 'Run at least 2 analyses to see MTBF and failure rate trends over time.'}
+                        {' '}Each analysis is automatically archived in the Logs.
                     </p>
                 </div>
             </div>
         );
     }
 
-    const trendIcon = data.trend === 'improving'
+    const trendIcon = view.trend === 'improving'
         ? <TrendingUp className="w-5 h-5 text-emerald-400" />
-        : data.trend === 'degrading'
+        : view.trend === 'degrading'
             ? <TrendingDown className="w-5 h-5 text-rose-400" />
             : <Minus className="w-5 h-5 text-amber-400" />;
 
-    const trendLabel = data.trend === 'improving' ? 'Improving' : data.trend === 'degrading' ? 'Degrading' : 'Stable';
-    const trendColor = data.trend === 'improving' ? 'text-emerald-400' : data.trend === 'degrading' ? 'text-rose-400' : 'text-amber-400';
+    const trendLabel = view.trend === 'improving' ? 'Improving' : view.trend === 'degrading' ? 'Degrading' : 'Stable';
+    const trendColor = view.trend === 'improving' ? 'text-emerald-400' : view.trend === 'degrading' ? 'text-rose-400' : 'text-amber-400';
 
     return (
         <div className="max-w-6xl animate-in fade-in slide-in-from-bottom-4 duration-700 space-y-8">
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-3xl font-bold text-white mb-2 tracking-tight">Reliability Trends</h2>
-                    <p className="text-slate-400 text-sm">Cross-run comparison of {data.num_runs ?? data.runs.length} archived analyses.</p>
+                    <p className="text-slate-400 text-sm">
+                        Cross-run comparison of {view.num_runs} archived analyses{view.file ? <> of <span className="font-mono text-slate-300">{view.file}</span></> : null}.
+                    </p>
                 </div>
+                <div className="flex flex-wrap items-center gap-3">
+                {sourceSelector}
                 <div className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-slate-900/50 border border-slate-800">
                     {trendIcon}
                     <span className={`text-sm font-semibold ${trendColor}`}>
-                        MTBF {trendLabel} ({(data.mtbf_change_pct ?? 0) > 0 ? '+' : ''}{data.mtbf_change_pct ?? 0}%)
+                        MTBF {trendLabel} ({(view.mtbf_change_pct ?? 0) > 0 ? '+' : ''}{view.mtbf_change_pct ?? 0}%)
                     </span>
+                </div>
                 </div>
             </div>
 
@@ -165,7 +214,7 @@ export default function TrendsView() {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800">
-                        {data.runs.map((run) => (
+                        {view.runs.map((run) => (
                             <tr key={run.id} className="hover:bg-slate-800/20 transition-colors">
                                 <td className="px-6 py-3 text-xs text-slate-300">{run.date}</td>
                                 <td className="px-6 py-3 text-xs text-slate-400 font-mono max-w-[200px] truncate">{run.file}</td>

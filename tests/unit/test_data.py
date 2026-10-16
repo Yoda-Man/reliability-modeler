@@ -63,3 +63,8 @@ def test_load_unreadable_raises(tmp_path):
     p.write_bytes(b"\xff\xfe\x00bad")
     with pytest.raises(TaxonomyError, match="unreadable"):
         load_fault_categories(p)
+
+
+def test_comma_in_category_name_rejected():
+    with pytest.raises(TaxonomyError, match="line 2.*must not contain ','"):
+        parse_fault_categories("Disk [disk]\nNetwork, DNS [dns]\n")

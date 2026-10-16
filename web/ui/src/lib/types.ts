@@ -1,11 +1,5 @@
 /** Response shapes of the FastAPI backend (web/api/main.py), as seen through /api/*. */
 
-/** Error body used by every API error response (and by the UI proxy). */
-export interface ApiErrorBody {
-    detail?: unknown;
-    error?: unknown;
-}
-
 /** One categorized failure: [ISO timestamp, hours since t0, "Cat1, Cat2", description]. */
 export type CategorizedFailure = [string, number, string, string];
 
@@ -37,9 +31,17 @@ export interface AnalysisResults {
         duration_hours: number;
         start_time: string;
     };
+    /** Empty when no model could be fitted to the data. */
     models: ModelResult[];
     plots: Record<string, string>;
+    /** The most recent (up to 100) categorized events, oldest first. */
     categorized_failures: CategorizedFailure[];
+    /** Total number of categorized events (may exceed categorized_failures.length). */
+    categorized_total?: number;
+    /** Forecast horizon (hours) the result was computed with. */
+    future_hours?: number;
+    /** True when a Sentry project hit the event cap and the timeline was trimmed to a common start. */
+    truncated?: boolean;
     graph_insights?: string[];
     graph_report?: GraphReport | null;
     projects?: Record<string, number>;
@@ -72,13 +74,30 @@ export interface TrendRun {
     failure_rate_per_hour: number;
 }
 
-/** GET /trends. Summary fields are only present once there are >= 2 runs. */
+export type TrendDirection = 'improving' | 'degrading' | 'stable' | 'insufficient_data' | 'single_run';
+
+/** Trend of the runs for one source (`file`). */
+export interface TrendGroup {
+    file: string;
+    runs: TrendRun[];
+    trend: TrendDirection;
+    mtbf_change_pct?: number;
+    rate_change_pct?: number;
+    num_runs: number;
+}
+
+/**
+ * GET /trends. Summary fields are only present once there are >= 2 runs.
+ * Top-level trend fields describe the group of the most recent run; `runs` holds
+ * every run. `groups` (per source) is absent from older API versions.
+ */
 export interface TrendsResponse {
     runs: TrendRun[];
-    trend: 'improving' | 'degrading' | 'stable' | 'insufficient_data' | 'single_run';
+    trend: TrendDirection;
     mtbf_change_pct?: number;
     rate_change_pct?: number;
     num_runs?: number;
+    groups?: TrendGroup[];
 }
 
 export interface EngineSettings {

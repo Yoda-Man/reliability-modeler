@@ -8,6 +8,7 @@ import {
   formatLogLine,
   isAllowedMethod,
   parseTimeoutMs,
+  parseTrustProxy,
   pickResponseHeaders,
   readBodyWithLimit,
   resolveRequestId,
@@ -53,7 +54,7 @@ describe('method allowlist', () => {
 describe('timeout', () => {
   it('parses PROXY_TIMEOUT_MS with a safe default', () => {
     expect(parseTimeoutMs(undefined)).toBe(DEFAULT_PROXY_TIMEOUT_MS);
-    expect(DEFAULT_PROXY_TIMEOUT_MS).toBe(130000);
+    expect(DEFAULT_PROXY_TIMEOUT_MS).toBe(250000);
     expect(parseTimeoutMs('5000')).toBe(5000);
     expect(parseTimeoutMs('-1')).toBe(DEFAULT_PROXY_TIMEOUT_MS);
     expect(parseTimeoutMs('abc')).toBe(DEFAULT_PROXY_TIMEOUT_MS);
@@ -81,15 +82,28 @@ describe('body limit', () => {
 });
 
 describe('X-Forwarded-For', () => {
-  it('uses the right-most forwarded address, else x-real-ip', () => {
-    expect(clientAddress('1.1.1.1, 10.0.0.2', null)).toBe('10.0.0.2');
-    expect(clientAddress(null, '192.168.1.5')).toBe('192.168.1.5');
-    expect(clientAddress(null, null)).toBeNull();
-    expect(clientAddress('::ffff:172.18.0.1', null)).toBe('::ffff:172.18.0.1');
+  it('ignores client-supplied forwarding headers unless the proxy is trusted', () => {
+    expect(clientAddress('6.6.6.6', null)).toBeNull();
+    expect(clientAddress(null, '6.6.6.6')).toBeNull();
+    expect(clientAddress('6.6.6.6', '7.7.7.7', false)).toBeNull();
+  });
+  it('with a trusted proxy uses the right-most forwarded address, else x-real-ip', () => {
+    expect(clientAddress('1.1.1.1, 10.0.0.2', null, true)).toBe('10.0.0.2');
+    expect(clientAddress(null, '192.168.1.5', true)).toBe('192.168.1.5');
+    expect(clientAddress(null, null, true)).toBeNull();
+    expect(clientAddress('::ffff:172.18.0.1', null, true)).toBe('::ffff:172.18.0.1');
   });
   it('drops values that are not IP addresses', () => {
-    expect(clientAddress('evil\r\nX: y', null)).toBeNull();
-    expect(clientAddress('example.com', null)).toBeNull();
+    expect(clientAddress('evil\r\nX: y', null, true)).toBeNull();
+    expect(clientAddress('example.com', null, true)).toBeNull();
+  });
+  it('parses TRUST_PROXY strictly (only "true" enables it)', () => {
+    expect(parseTrustProxy(undefined)).toBe(false);
+    expect(parseTrustProxy('')).toBe(false);
+    expect(parseTrustProxy('1')).toBe(false);
+    expect(parseTrustProxy('false')).toBe(false);
+    expect(parseTrustProxy('true')).toBe(true);
+    expect(parseTrustProxy(' TRUE ')).toBe(true);
   });
 });
 

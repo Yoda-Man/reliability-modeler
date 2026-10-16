@@ -24,14 +24,19 @@ def parse_fault_categories(text: str):
 
     Format (one rule per line; '#' starts a comment line):
         Category [keyword1, keyword2, keyword3]
+
+    Category names must not contain ',' (categories are joined with ", "
+    downstream); such a name raises TaxonomyError.
     """
     categories = []
-    for line in text.splitlines():
+    for lineno, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith('#') or '[' not in line:
             continue
         cat_name, rest = line.split('[', 1)
         cat_name = cat_name.strip()
+        if ',' in cat_name:
+            raise TaxonomyError(f"Category name {cat_name!r} on line {lineno} must not contain ','")
         keywords = {k.strip().lower() for k in rest.rstrip(']').split(',') if k.strip()}
         if cat_name and keywords:
             categories.append((cat_name, keywords))

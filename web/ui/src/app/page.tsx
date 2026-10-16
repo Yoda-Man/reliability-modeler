@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp, Bug, UserCircle } from 'lucide-react';
+import { ShieldCheck, Database, LayoutDashboard, Settings, Info, Menu, X, Book, Shield, Heart, TrendingUp, Bug, UserCircle, Bot } from 'lucide-react';
 import { apiJson } from '@/lib/api';
 import type { AnalysisResults } from '@/lib/types';
 import SystemStatus from '@/components/SystemStatus';
@@ -14,15 +14,15 @@ import SentryView from '@/components/SentryView';
 import UserManualView from '@/components/UserManualView';
 import PrivacyPolicy from '@/components/PrivacyPolicy';
 import AboutView from '@/components/AboutView';
+import AgentsView from '@/components/AgentsView';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('sentry');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<AnalysisResults | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [futureHours, setFutureHours] = useState(1000);
 
-  const handleSentryAnalyze = async (org: string, project: string, days: number) => {
+  const handleSentryAnalyze = async (org: string, project: string, days: number, futureHours: number) => {
     setIsAnalyzing(true);
     try {
       // Errors (ApiError with status + detail) propagate to SentryView, which displays them.
@@ -47,6 +47,7 @@ export default function Home() {
     if (activeTab === 'user-manual') return <UserManualView />;
     if (activeTab === 'privacy') return <PrivacyPolicy />;
     if (activeTab === 'about') return <AboutView />;
+    if (activeTab === 'agents') return <AgentsView />;
 
     // Dashboard View
     if (!results) {
@@ -74,11 +75,7 @@ export default function Home() {
     }
     return (
       <div className="print:p-0">
-        <Dashboard
-          data={results}
-          futureHours={futureHours}
-          onFutureHoursChange={setFutureHours}
-        />
+        <Dashboard data={results} />
       </div>
     );
   };
@@ -154,6 +151,12 @@ export default function Home() {
             label="Methodology"
             active={activeTab === 'methodology'}
             onClick={() => { setActiveTab('methodology'); setIsSidebarOpen(false); }}
+          />
+          <NavItem
+            icon={<Bot size={18} />}
+            label="AI Agents (MCP)"
+            active={activeTab === 'agents'}
+            onClick={() => { setActiveTab('agents'); setIsSidebarOpen(false); }}
           />
           <div className="pt-4 mt-4 border-t border-slate-900/50">
             <p className="px-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Support & Legal</p>

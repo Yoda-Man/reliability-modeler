@@ -6,6 +6,9 @@
 #
 # Only the UI is published to the host. The API is reachable solely on the
 # internal compose network (the UI's server-side proxy talks to http://api:8000).
+#
+# CPU limits default to 1 each (API_CPUS / UI_CPUS), so a 1-vCPU host is the
+# minimum; a limit above the host's CPU count makes the container fail to start.
 
 x-logging: &default-logging
   driver: json-file
@@ -49,8 +52,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: 1g
+          cpus: "${API_CPUS:-1}"
+          memory: ${API_MEMORY:-1g}
     logging: *default-logging
 
   ui:
@@ -67,7 +70,9 @@ services:
       RELIABILITY_API_KEY: ${RELIABILITY_API_KEY:?set RELIABILITY_API_KEY in .env}
       UI_USERNAME: ${UI_USERNAME:-admin}
       UI_PASSWORD: ${UI_PASSWORD:?set UI_PASSWORD in .env}
-      PROXY_TIMEOUT_MS: ${PROXY_TIMEOUT_MS:-130000}
+      PROXY_TIMEOUT_MS: ${PROXY_TIMEOUT_MS:-250000}
+      # "true" only behind a reverse proxy that sets X-Forwarded-For itself.
+      TRUST_PROXY: ${TRUST_PROXY:-false}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/healthz"]
       interval: 30s
@@ -77,8 +82,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: 512m
+          cpus: "${UI_CPUS:-1}"
+          memory: ${UI_MEMORY:-512m}
     logging: *default-logging
 
 volumes:

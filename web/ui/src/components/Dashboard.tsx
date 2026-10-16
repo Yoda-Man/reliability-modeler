@@ -9,7 +9,7 @@ import {
 } from 'recharts';
 import {
     Activity, TrendingDown, AlertTriangle, CheckCircle,
-    Maximize2, HelpCircle, Clock, Target, Zap, Network, ChevronDown,
+    HelpCircle, Clock, Target, Zap, Network, ChevronDown,
     ChevronUp, FileText, CalendarClock
 } from 'lucide-react';
 
@@ -172,7 +172,16 @@ function GraphInsightCard({ graphReport }: { graphReport: GraphReport | null | u
     );
 }
 
-function RiskBubbleChart({ categorized, graphReport }: { categorized: CategorizedFailure[]; graphReport?: GraphReport | null }) {
+/** Caption for charts built from categorized_failures when the API sent only the most recent slice. */
+function sampleCaption(shown: number, total: number | undefined): string | null {
+    return total !== undefined && total > shown ? `most recent ${shown} of ${total} events` : null;
+}
+
+function SampleNote({ caption }: { caption: string | null }) {
+    return caption ? <span className="text-[10px] text-amber-400/80 font-normal">({caption})</span> : null;
+}
+
+function RiskBubbleChart({ categorized, graphReport, caption }: { categorized: CategorizedFailure[]; graphReport?: GraphReport | null; caption: string | null }) {
     const data = useMemo(() => {
         const counts = buildCategoryCounts(categorized);
         const pagerankMap: Record<string, number> = {};
@@ -197,6 +206,7 @@ function RiskBubbleChart({ categorized, graphReport }: { categorized: Categorize
                 <Target className="w-4 h-4 text-rose-400" />
                 <span>Risk Landscape</span>
                 <span className="text-[10px] text-slate-500 font-normal ml-2">size = failure count, x = centrality</span>
+                <SampleNote caption={caption} />
             </h3>
             <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
@@ -230,12 +240,12 @@ function RiskBubbleChart({ categorized, graphReport }: { categorized: Categorize
     );
 }
 
-function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: CategorizedFailure[]; windowSize?: number }) {
+function MTBFTrendChart({ categorized, windowSize = 20, caption }: { categorized: CategorizedFailure[]; windowSize?: number; caption: string | null }) {
     const data = useMemo(() => computeMTBFOverTime(categorized, windowSize), [categorized, windowSize]);
     if (data.length < 2) {
         return (
             <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl flex items-center justify-center h-64">
-                <p className="text-xs text-slate-500">Need more data for MTBF trend (min 20 failures).</p>
+                <p className="text-xs text-slate-500">Need more data for MTBF trend (min {windowSize + 2} failures).</p>
             </div>
         );
     }
@@ -245,6 +255,7 @@ function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: Categor
                 <Activity className="w-4 h-4 text-emerald-400" />
                 <span>MTBF Trend</span>
                 <span className="text-[10px] text-slate-500 font-normal">rolling window of {windowSize} failures</span>
+                <SampleNote caption={caption} />
             </h3>
             <div className="h-56">
                 <ResponsiveContainer width="100%" height="100%">
@@ -261,7 +272,7 @@ function MTBFTrendChart({ categorized, windowSize = 20 }: { categorized: Categor
     );
 }
 
-function FailureHeatmap({ categorized }: { categorized: CategorizedFailure[] }) {
+function FailureHeatmap({ categorized, caption }: { categorized: CategorizedFailure[]; caption: string | null }) {
     const { grid, maxVal, total } = useMemo(() => buildHeatmapData(categorized), [categorized]);
     if (total === 0) {
         return (
@@ -286,6 +297,7 @@ function FailureHeatmap({ categorized }: { categorized: CategorizedFailure[] }) 
                 <CalendarClock className="w-4 h-4 text-amber-400" />
                 <span>Failure Heatmap</span>
                 <span className="text-[10px] text-slate-500 font-normal">day of week × hour of day</span>
+                <SampleNote caption={caption} />
                 <span className="text-[10px] text-slate-600 ml-auto">{total} events</span>
             </h3>
             <div className="overflow-x-auto">
@@ -335,52 +347,59 @@ function FailureHeatmap({ categorized }: { categorized: CategorizedFailure[] }) 
 
 // ── Main Dashboard ──────────────────────────────────────────────────────────
 
-export default function Dashboard({
-    data, futureHours, onFutureHoursChange
-}: {
-    data: AnalysisResults;
-    futureHours: number;
-    onFutureHoursChange: (h: number) => void;
-}) {
-    const [showPNGPlots, setShowPNGPlots] = useState(true);
-    const bestModel = data.models.reduce((prev, curr) => prev.aic < curr.aic ? prev : curr);
+export default function Dashboard({ data }: { data: AnalysisResults }) {
+    // `models` is empty when no model converged; the KPIs/charts that don't need one still render.
+    const bestModel = data.models.length > 0
+        ? data.models.reduce((prev, curr) => prev.aic < curr.aic ? prev : curr)
+        : null;
     const categoryData = useMemo(() => buildCategoryCounts(data.categorized_failures), [data.categorized_failures]);
+    const recentFailures = useMemo(() => data.categorized_failures.slice(-50).reverse(), [data.categorized_failures]);
+    const caption = sampleCaption(data.categorized_failures.length, data.categorized_total);
     const mtbf = data.summary.duration_hours / (data.summary.total_failures || 1);
-    const residuals = bestModel.total_expected_failures
+    const residuals = bestModel?.total_expected_failures
         ? Math.max(0, Math.round(bestModel.total_expected_failures - data.summary.total_failures))
         : null;
 
     return (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
-            {/* ── Top Bar: Forecast Slider + Actions ─────────────────────── */}
+            {/* ── Top Bar: Forecast horizon + Actions ────────────────────── */}
             <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-600/10 to-indigo-600/5 border border-blue-500/20 backdrop-blur-xl flex flex-col md:flex-row items-center justify-between gap-6">
                 <div className="flex items-center space-x-4">
                     <div className="p-3 rounded-xl bg-blue-500/20"><Clock className="w-6 h-6 text-blue-400" /></div>
                     <div>
-                        <h3 className="text-white font-bold tracking-tight">Prediction Playground</h3>
-                        <p className="text-xs text-slate-400">Project system stability {futureHours}h into the future.</p>
+                        <h3 className="text-white font-bold tracking-tight">Reliability Forecast</h3>
+                        <p className="text-xs text-slate-400">
+                            {data.future_hours !== undefined
+                                ? `Projected ${data.future_hours}h into the future (set the horizon on the Sentry page before running).`
+                                : 'Forecast horizon not recorded for this run.'}
+                        </p>
                     </div>
                 </div>
-                <div className="flex-1 max-w-md w-full px-4">
-                    <div className="flex justify-between mb-2">
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Horizon: {futureHours} Hours</span>
-                    </div>
-                    <input type="range" min="100" max="5000" step="100" value={futureHours}
-                        onChange={(e) => onFutureHoursChange(parseInt(e.target.value))}
-                        className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500" />
-                </div>
-                <div className="flex space-x-2">
-                    <button onClick={() => setShowPNGPlots(!showPNGPlots)}
-                        className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs hover:text-white transition-all">
-                        {showPNGPlots ? 'Interactive' : 'Plots'}
-                    </button>
-                    <button onClick={() => window.print()}
-                        className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-slate-900 font-bold text-xs hover:bg-slate-200 transition-all shadow-lg">
-                        <FileText className="w-4 h-4" />
-                        <span>Print Report</span>
-                    </button>
-                </div>
+                <button onClick={() => window.print()}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-slate-900 font-bold text-xs hover:bg-slate-200 transition-all shadow-lg">
+                    <FileText className="w-4 h-4" />
+                    <span>Print Report</span>
+                </button>
             </div>
+
+            {data.truncated && (
+                <div role="note" className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-start space-x-3">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                    <p className="text-sm text-amber-200">
+                        Some busy projects hit Sentry&apos;s event cap; the timeline was trimmed to a common start.
+                    </p>
+                </div>
+            )}
+
+            {!bestModel && (
+                <div role="status" className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-start space-x-3">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" />
+                    <p className="text-sm text-rose-200">
+                        No model could be fitted to this data. Failure counts, categories and timing below are still valid;
+                        model-based predictions are unavailable.
+                    </p>
+                </div>
+            )}
 
             {/* ── KPI Row ────────────────────────────────────────────────── */}
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
@@ -393,9 +412,9 @@ export default function Dashboard({
                 <KPICard title="Predicted Residuals" value={residuals !== null ? residuals.toString() : 'N/A'}
                     icon={<TrendingDown className="text-rose-500 w-4 h-4" />}
                     description="Failures remaining" tooltip="Statistical estimate of undiscovered faults." />
-                <KPICard title="Best Model" value={bestModel.name.split('-')[0]}
+                <KPICard title="Best Model" value={bestModel ? bestModel.name.split('-')[0] : 'None'}
                     icon={<CheckCircle className="text-emerald-500 w-4 h-4" />}
-                    description={`AIC: ${bestModel.aic.toFixed(1)}`} tooltip="AIC measures fit quality. Lower is better." />
+                    description={bestModel ? `AIC: ${bestModel.aic.toFixed(1)}` : 'No model fitted'} tooltip="AIC measures fit quality. Lower is better." />
                 <KPICard title="Failure Rate" value={(data.summary.total_failures / Math.max(1, data.summary.duration_hours)).toFixed(2) + '/h'}
                     icon={<Zap className="text-purple-500 w-4 h-4" />}
                     description="Failures per hour" tooltip="Overall failure intensity across the observation period." />
@@ -434,12 +453,7 @@ export default function Dashboard({
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Reliability Growth — PNG fallback or Recharts area */}
                 <div className="lg:col-span-2 p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl">
-                    <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-sm font-semibold text-white">Reliability Growth Projection</h3>
-                        <button className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white transition-colors">
-                            <Maximize2 className="w-3.5 h-3.5" />
-                        </button>
-                    </div>
+                    <h3 className="text-sm font-semibold text-white mb-4">Reliability Growth Projection</h3>
                     {data.plots.reliability ? (
                         <img src={`data:image/png;base64,${data.plots.reliability}`} alt="Reliability growth"
                             className="w-full h-auto rounded-lg" />
@@ -454,11 +468,14 @@ export default function Dashboard({
                 <div className="space-y-4">
                     <div className="p-5 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl">
                         <h3 className="text-sm font-semibold text-white mb-3">Model Comparison</h3>
+                        {data.models.length === 0 && (
+                            <p className="text-xs text-slate-500">No model could be fitted to this data.</p>
+                        )}
                         {data.models.map(model => (
                             <div key={model.id} className="flex items-center justify-between p-2.5 rounded-lg mb-2 bg-slate-800/20 border border-slate-700/20">
                                 <div className="flex items-center space-x-2">
                                     <span className="text-xs font-medium text-slate-300">{model.name}</span>
-                                    {model.id === bestModel.id && (
+                                    {model.id === bestModel?.id && (
                                         <span className="text-[9px] font-bold text-emerald-500 uppercase bg-emerald-500/10 px-1.5 py-0.5 rounded">Best</span>
                                     )}
                                 </div>
@@ -476,7 +493,10 @@ export default function Dashboard({
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Category Breakdown — Recharts interactive bar */}
                 <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl">
-                    <h3 className="text-sm font-semibold text-white mb-4">Failure Categories</h3>
+                    <h3 className="text-sm font-semibold text-white mb-4 flex items-center space-x-2">
+                        <span>Failure Categories</span>
+                        <SampleNote caption={caption} />
+                    </h3>
                     <div className="h-72">
                         <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={categoryData.slice(0, 10)} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 80 }}>
@@ -510,12 +530,14 @@ export default function Dashboard({
 
             {/* ── MTBF Trend + Risk Bubble ────────────────────────────────── */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <MTBFTrendChart categorized={data.categorized_failures} windowSize={Math.max(10, Math.floor(data.summary.total_failures / 20))} />
-                <RiskBubbleChart categorized={data.categorized_failures} graphReport={data.graph_report} />
+                {/* Window is based on the events actually received (the API sends at most the last 100). */}
+                <MTBFTrendChart categorized={data.categorized_failures} caption={caption}
+                    windowSize={Math.max(10, Math.floor(data.categorized_failures.length / 10))} />
+                <RiskBubbleChart categorized={data.categorized_failures} graphReport={data.graph_report} caption={caption} />
             </div>
 
             {/* ── Failure Heatmap ─────────────────────────────────────────── */}
-            <FailureHeatmap categorized={data.categorized_failures} />
+            <FailureHeatmap categorized={data.categorized_failures} caption={caption} />
 
             {/* ── Category PNG + Recent Failures ──────────────────────────── */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -527,9 +549,12 @@ export default function Dashboard({
                     </div>
                 )}
                 <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl overflow-hidden">
-                    <h3 className="text-sm font-semibold text-white mb-4">Recent Failure Events</h3>
+                    <h3 className="text-sm font-semibold text-white mb-4 flex items-center space-x-2">
+                        <span>Recent Failure Events</span>
+                        <span className="text-[10px] text-slate-500 font-normal">newest first</span>
+                    </h3>
                     <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
-                        {data.categorized_failures.slice(0, 50).map((fail, i) => (
+                        {recentFailures.map((fail, i) => (
                             <div key={i} className="flex items-center p-2.5 rounded-lg bg-slate-800/20 border border-slate-700/20 text-xs hover:bg-slate-800/40 transition-colors">
                                 <span className="text-slate-500 mr-3 font-mono text-[10px] w-12">{Number(fail[1]).toFixed(2)}h</span>
                                 <span className="px-2 py-0.5 rounded-full bg-slate-700/50 text-slate-400 mr-3 font-medium truncate max-w-[90px] text-[10px]">{fail[2]}</span>

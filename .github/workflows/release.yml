@@ -3,6 +3,8 @@ name: Release
 # Builds multi-arch images and pushes them to Docker Hub.
 #   - automatically on a version tag (v2.9.0 -> :2.9.0 and :latest)
 #   - manually via "Run workflow" (choose whether to also move :latest)
+# Only a v* tag matching __version__ or the main branch may publish; the full
+# test suite (test.yml, reused) must pass first.
 #
 # Required repository secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
 # (Docker Hub access token with Read & Write scope, not the account password).
@@ -28,9 +30,11 @@ env:
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
-  release:
-    name: Build & push (${{ github.ref_name }})
+  guard:
+    name: Check ref and version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -39,16 +43,32 @@ jobs:
         run: |
           VERSION="$(sed -nE 's/^__version__[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/p' modeler/__init__.py)"
           if [ -z "$VERSION" ]; then echo "::error::__version__ not found in modeler/__init__.py"; exit 1; fi
-          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match __version__ ${VERSION}"; exit 1
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match __version__ ${VERSION}"; exit 1
+            fi
+          elif [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Releases run only from a v* tag or main (got ${GITHUB_REF})"; exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: Tests
+    needs: guard
+    uses: ./.github/workflows/test.yml
+
+  release:
+    name: Build & push (${{ github.ref_name }})
+    needs: [guard, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Compute tags
         id: tags
         env:
           NS: ${{ secrets.DOCKERHUB_USERNAME }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.guard.outputs.version }}
           TAG_LATEST: ${{ github.event_name == 'push' || inputs.tag_latest }}
         run: |
           for svc in api ui; do
@@ -74,7 +94,7 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.api }}
           labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ needs.guard.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: true
@@ -91,7 +111,7 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.ui }}
           labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ needs.guard.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: true

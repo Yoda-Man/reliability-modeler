@@ -45,7 +45,8 @@ class CentralityScore:
     node: str
     pagerank: float = 0.0
     betweenness: float = 0.0
-    degree: int = 0
+    degree: int = 0                 # weighted degree (sum of co-occurrence edge weights)
+    neighbors: int = 0              # number of distinct categories it is linked to
     is_keystone: bool = False       # top 20% by PageRank
     is_bridge: bool = False         # top 20% by betweenness
 
@@ -73,9 +74,8 @@ class CooccurrenceEdge:
     """A weighted edge between two failure categories."""
     source: str
     target: str
-    weight: int                     # co-occurrence count
-    normalized_weight: float        # Jaccard similarity
-    temporal_proximity_hours: float # median time between co-occurrences
+    weight: int                     # co-occurrence (or temporal-proximity) count
+    normalized_weight: float        # 0-1: Jaccard similarity, or share of all proximity pairs
 
 
 @dataclass
@@ -148,11 +148,11 @@ def build_failure_graphs(
     # ── 1. Co-occurrence Graph (undirected, weighted) ─────────────────────
     G_cooc = nx.Graph()
     cooc_counter: Counter = Counter()
-    cat_sets: List[Set[str]] = []
+    cat_freq: Counter = Counter()   # number of events containing each category
 
     for _, cats, _ in events:
         cat_set = set(cats)
-        cat_sets.append(cat_set)
+        cat_freq.update(cat_set)
         for i, c1 in enumerate(sorted(cat_set)):
             for c2 in sorted(cat_set)[i + 1:]:
                 pair = tuple(sorted([c1, c2]))
@@ -179,13 +179,24 @@ def build_failure_graphs(
         cooc_counter = temporal_proximity
         logger.info(f"Built {len(cooc_counter)} temporal-proximity edges "
                      f"({proximity_window:.0f}h window)")
+        # A proximity count is a number of event *pairs*, which can far exceed
+        # either category's event count, so Jaccard does not apply. Normalise
+        # by the total number of proximity pairs instead (stays within 0-1).
+        total_pairs = sum(cooc_counter.values()) or 1
 
+        def normalized(_c1: str, _c2: str, count: int) -> float:
+            return count / total_pairs
+    else:
+        def normalized(c1: str, c2: str, count: int) -> float:
+            # Jaccard: events containing both / events containing either
+            return count / max(1, cat_freq[c1] + cat_freq[c2] - count)
+
+    norm_weights: Dict[Tuple[str, str], float] = {
+        pair: round(normalized(pair[0], pair[1], count), 4) for pair, count in cooc_counter.items()
+    }
     for (c1, c2), count in cooc_counter.items():
         if count >= min_cooccurrence:
-            set_a = sum(1 for s in cat_sets if c1 in s)
-            set_b = sum(1 for s in cat_sets if c2 in s)
-            jaccard = count / max(1, set_a + set_b - count)
-            G_cooc.add_edge(c1, c2, weight=count, jaccard=round(jaccard, 4))
+            G_cooc.add_edge(c1, c2, weight=count, jaccard=norm_weights[(c1, c2)])
 
     # Ensure all categories are present as nodes (even isolates)
     for cat in all_categories:
@@ -195,7 +206,7 @@ def build_failure_graphs(
     # ── 2. Cascade Graph (directed, weighted) ─────────────────────────────
     G_cascade = nx.DiGraph()
     cascade_counter: Counter = Counter()
-    cascade_latencies: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+    cascade_latency_sum: Dict[Tuple[str, str], float] = defaultdict(float)
 
     for i in range(len(events) - 1):
         ti, cats_i, _ = events[i]
@@ -210,12 +221,12 @@ def build_failure_graphs(
                 for dst in cats_j:
                     if src != dst:
                         cascade_counter[(src, dst)] += 1
-                        cascade_latencies[(src, dst)].append(gap)
+                        cascade_latency_sum[(src, dst)] += gap
 
     total_cascades = sum(cascade_counter.values()) or 1
     for (src, dst), count in cascade_counter.items():
         if count >= 2:  # need at least 2 occurrences to be considered a pattern
-            avg_lat = np.mean(cascade_latencies[(src, dst)])
+            avg_lat = cascade_latency_sum[(src, dst)] / count
             confidence = count / total_cascades
             G_cascade.add_edge(src, dst, weight=count, avg_latency=round(float(avg_lat), 2),
                                confidence=round(confidence, 4))
@@ -227,7 +238,7 @@ def build_failure_graphs(
     # ── 3. Analytics ──────────────────────────────────────────────────────
     cascade_chains = _extract_cascade_chains(events, G_cascade, cascade_window_hours)
     return _compute_graph_analytics(G_cooc, G_cascade, all_categories,
-                                    cascade_chains, cooc_counter, cat_sets)
+                                    cascade_chains, cooc_counter, norm_weights)
 
 
 def _compute_graph_analytics(
@@ -236,7 +247,7 @@ def _compute_graph_analytics(
     all_categories: List[str],
     cascade_chains: List[CascadeChain],
     cooc_counter: Counter,
-    cat_sets: List[Set[str]],
+    norm_weights: Dict[Tuple[str, str], float],
 ) -> FailureGraphReport:
 
     # ── Centrality ────────────────────────────────────────────────────────
@@ -265,6 +276,7 @@ def _compute_graph_analytics(
             pagerank=round(pagerank.get(cat, 0), 6),
             betweenness=round(betweenness.get(cat, 0), 6),
             degree=int(deg),
+            neighbors=G_cooc.degree(cat) if cat in G_cooc else 0,
             is_keystone=bool(pagerank.get(cat, 0) >= pr_threshold),
             is_bridge=bool(betweenness.get(cat, 0) >= bw_threshold),
         ))
@@ -298,15 +310,11 @@ def _compute_graph_analytics(
     # ── Co-occurrence Edges ───────────────────────────────────────────────
     cooc_edges = []
     for (c1, c2), count in cooc_counter.most_common(30):
-        set_a = sum(1 for s in cat_sets if c1 in s)
-        set_b = sum(1 for s in cat_sets if c2 in s)
-        jaccard = count / max(1, set_a + set_b - count)
         cooc_edges.append(CooccurrenceEdge(
             source=c1, target=c2, weight=count,
-            normalized_weight=round(jaccard, 4),
-            temporal_proximity_hours=0.0,  # not computed at edge level
+            normalized_weight=norm_weights[(c1, c2)],
         ))
-    # Sort by Jaccard similarity
+    # Sort by normalized weight
     cooc_edges.sort(key=lambda e: e.normalized_weight, reverse=True)
 
     # ── Graph Metrics ─────────────────────────────────────────────────────
@@ -379,7 +387,9 @@ def _extract_cascade_chains(
 
     times = [e[0] for e in events]
     trigger_totals: Counter = Counter()
-    occurrences: Dict[Tuple[str, ...], List[float]] = defaultdict(list)
+    # chain -> [occurrence count, sum of latencies]; running totals keep memory
+    # proportional to the number of distinct chains, not to events x chains.
+    occurrences: Dict[Tuple[str, ...], List[float]] = defaultdict(lambda: [0, 0.0])
 
     for i, (t_i, cats_i, _) in enumerate(events):
         for start in set(cats_i):
@@ -412,20 +422,22 @@ def _extract_cascade_chains(
                 if not frontier:
                     break
             for chain, latency in found.items():
-                occurrences[chain].append(latency)
+                acc = occurrences[chain]
+                acc[0] += 1
+                acc[1] += latency
 
     ranked = sorted(
         occurrences.items(),
-        key=lambda kv: (-len(kv[1]), -len(kv[0]), float(np.mean(kv[1])), kv[0]),
+        key=lambda kv: (-kv[1][0], -len(kv[0]), kv[1][1] / kv[1][0], kv[0]),
     )[:top_n]
     return [
         CascadeChain(
             chain=list(chain),
-            occurrence_count=len(lats),
-            avg_latency_hours=round(float(np.mean(lats)), 2),
-            confidence=round(len(lats) / max(1, trigger_totals[chain[0]]), 4),
+            occurrence_count=int(count),
+            avg_latency_hours=round(float(lat_sum / count), 2),
+            confidence=round(count / max(1, trigger_totals[chain[0]]), 4),
         )
-        for chain, lats in ranked
+        for chain, (count, lat_sum) in ranked
     ]
 
 
@@ -450,8 +462,9 @@ def generate_graph_insights(report: FailureGraphReport) -> List[str]:
         lines.append("🔑 Keystone Failure Categories (highest systemic impact):")
         for c in keystones[:5]:
             tag = " [BRIDGE]" if c.is_bridge else ""
+            noun = "category" if c.neighbors == 1 else "categories"
             lines.append(f"  • {c.node}{tag} — PageRank {c.pagerank:.4f}, "
-                         f"connected to {c.degree} other categories")
+                         f"connected to {c.neighbors} other {noun}")
         lines.append("   → Fixing these will have the greatest ripple effect.\n")
 
     # Cascade chains

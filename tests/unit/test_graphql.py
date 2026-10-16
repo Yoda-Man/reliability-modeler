@@ -158,16 +158,54 @@ def test_new_analysis_id_format_accepted():
     assert get_categorized_data("AN-20260101-120000-0A1B2C") is None
 
 
-def test_memory_cache_bounded_on_disk_warm_path(monkeypatch):
-    monkeypatch.setattr(gql._analysis_store, "maxsize", 3)
+def test_disk_reads_do_not_fill_memory_cache():
     ids = [f"AN-20250101-00000{i}" for i in range(6)]
     for aid in ids:
         store_analysis_data(aid, _sample_categorized())
     _analysis_store.clear()
-    for aid in ids:  # every read warms the cache from disk
+    for aid in ids:
         assert get_categorized_data(aid) is not None
-    assert len(_analysis_store) == 3
-    assert _analysis_store.keys() == ids[-3:]
+    assert len(_analysis_store) == 0
+
+
+def test_memory_cache_bounded_by_total_events(monkeypatch):
+    monkeypatch.setattr(_analysis_store, "max_weight", 15)
+    for i in range(4):
+        store_analysis_data(f"AN-20250101-00000{i}", _sample_categorized())  # 6 events each
+    assert _analysis_store.keys() == ["AN-20250101-000002", "AN-20250101-000003"]
+    store_analysis_data("AN-20250101-000009", _sample_categorized() * 3)  # 18 > 15: not kept in memory
+    assert "AN-20250101-000009" not in _analysis_store
+    assert get_categorized_data("AN-20250101-000009") is not None  # still on disk
+    gql.forget_analyses(["AN-20250101-000002"])
+    assert _analysis_store.keys() == ["AN-20250101-000003"]
+
+
+def test_store_primes_report_cache(monkeypatch):
+    aid = "AN-20250101-000020"
+    report = gql.build_failure_graphs(_sample_categorized())
+    store_analysis_data(aid, _sample_categorized(), report=report)
+    monkeypatch.setattr(gql, "build_failure_graphs", lambda *a, **k: pytest.fail("rebuilt"))
+    assert gql.get_failure_report(aid) is report
+
+
+def test_graph_field_limit_counts_aliases():
+    aid = "AN-20250101-000021"
+    store_analysis_data(aid, _sample_categorized())
+    field = 'f%d: keystoneCategories(analysisId: "%s") { node }'
+    ok_query = "{ %s }" % " ".join(field % (i, aid) for i in range(gql.MAX_GRAPH_FIELDS))
+    body, ok = gql.execute_query(ok_query)
+    assert ok and "errors" not in body
+    too_many = "{ %s }" % " ".join(field % (i, aid) for i in range(gql.MAX_GRAPH_FIELDS + 1))
+    body, ok = gql.execute_query(too_many)
+    assert not ok and "Too many graph fields" in body["errors"][0]
+    # also through fragments; nested cascadeChains sub-fields are not root fields
+    frag = ("{ ...F } fragment F on Query { %s }" %
+            " ".join('g%d: failureGraph(analysisId: "%s") { cascadeChains { chain } }' % (i, aid)
+                     for i in range(gql.MAX_GRAPH_FIELDS + 1)))
+    body, ok = gql.execute_query(frag)
+    assert not ok and "Too many graph fields" in body["errors"][0]
+    body, ok = gql.execute_query('{ failureGraph(analysisId: "%s") { cascadeChains { chain } } }' % aid)
+    assert ok
 
 
 def test_report_cached_per_analysis(monkeypatch):

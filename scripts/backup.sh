@@ -36,12 +36,19 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARCHIVE="reliability-modeler-${PROJECT}-${STAMP}.tar.gz"
 
 echo "Backing up ${OUTPUT_VOL} + ${CONFIG_VOL} -> ${BACKUP_DIR}/${ARCHIVE}"
+# umask 077: the archive is created 0600 inside the helper (on Linux it would
+# otherwise be a root-owned 0644 file). It is then handed to the invoking user
+# and only renamed into place once tar has succeeded.
 docker run --rm \
   -v "${OUTPUT_VOL}:/data/output:ro" \
   -v "${CONFIG_VOL}:/data/config:ro" \
   -v "${BACKUP_DIR}:/backup" \
   "${HELPER_IMAGE}" \
-  tar czf "/backup/${ARCHIVE}" -C /data output config
+  sh -euc "
+    umask 077
+    tar czf '/backup/${ARCHIVE}.partial' -C /data output config
+    chown $(id -u):$(id -g) '/backup/${ARCHIVE}.partial'
+    mv '/backup/${ARCHIVE}.partial' '/backup/${ARCHIVE}'
+  "
 
-chmod 600 "${BACKUP_DIR}/${ARCHIVE}" 2>/dev/null || true
 echo "Done: ${BACKUP_DIR}/${ARCHIVE} ($(du -h "${BACKUP_DIR}/${ARCHIVE}" | cut -f1))"

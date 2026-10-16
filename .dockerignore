@@ -10,11 +10,15 @@
 
 # Runtime data
 output/
+backups/
 temp_plots/
 temp_uploads/
 logs/
 settings.json
 web/api/settings.json
+
+# Not part of the API image
+mcp_server/
 
 # Generated / planning artefacts
 graphify-out/

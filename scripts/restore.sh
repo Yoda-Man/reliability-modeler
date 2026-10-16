@@ -38,10 +38,16 @@ for v in "${OUTPUT_VOL}" "${CONFIG_VOL}"; do
   fi
 done
 
-# Validate archive layout before touching anything.
+# Validate the whole archive before touching anything: gzip CRC, a complete
+# tar listing (a truncated archive fails here), and both top-level directories.
 if ! docker run --rm -v "${ARCHIVE_DIR}:/backup:ro" "${HELPER_IMAGE}" \
-     sh -c "tar tzf '/backup/${ARCHIVE_NAME}' | grep -Eq '^(\./)?(output|config)/'"; then
-  echo "ERROR: ${ARCHIVE_NAME} does not look like a backup.sh archive (expects output/ and config/)." >&2
+     sh -euc "
+       gzip -t '/backup/${ARCHIVE_NAME}'
+       tar tzf '/backup/${ARCHIVE_NAME}' > /tmp/listing
+       grep -Eq '^(\./)?output/' /tmp/listing
+       grep -Eq '^(\./)?config/' /tmp/listing
+     "; then
+  echo "ERROR: ${ARCHIVE_NAME} is corrupt/truncated or not a backup.sh archive (expects output/ and config/). Nothing was changed." >&2
   exit 1
 fi
 
@@ -54,15 +60,22 @@ fi
 docker volume create "${OUTPUT_VOL}" >/dev/null
 docker volume create "${CONFIG_VOL}" >/dev/null
 
+# Extract to a staging dir inside the helper first; the volumes are only
+# emptied and refilled once the whole archive has been extracted.
 docker run --rm \
   -v "${OUTPUT_VOL}:/data/output" \
   -v "${CONFIG_VOL}:/data/config" \
   -v "${ARCHIVE_DIR}:/backup:ro" \
   "${HELPER_IMAGE}" \
   sh -euc "
+    mkdir /stage
+    tar xzf '/backup/${ARCHIVE_NAME}' -C /stage
+    test -d /stage/output
+    test -d /stage/config
     find /data/output -mindepth 1 -delete
     find /data/config -mindepth 1 -delete
-    tar xzf '/backup/${ARCHIVE_NAME}' -C /data
+    cp -a /stage/output/. /data/output/
+    cp -a /stage/config/. /data/config/
     chown -R ${APP_UID}:${APP_UID} /data/output /data/config
   "
 

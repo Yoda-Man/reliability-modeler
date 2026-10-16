@@ -5,7 +5,8 @@
 
 export const ALLOWED_METHODS: readonly string[] = ['GET', 'POST'];
 export const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB
-export const DEFAULT_PROXY_TIMEOUT_MS = 130_000; // slightly above the API's 120s analysis timeout
+// API worst case is Sentry fetch (<=120s) + analysis (<=120s); the browser client (api.ts) waits 260s.
+export const DEFAULT_PROXY_TIMEOUT_MS = 250_000;
 
 /** Response headers copied from the upstream API to the browser. */
 export const FORWARDED_RESPONSE_HEADERS: readonly string[] = [
@@ -40,14 +41,26 @@ export function parseTimeoutMs(raw: string | undefined): number {
 
 /**
  * Pick the client address to forward as X-Forwarded-For.
- * Uses the right-most entry of the incoming header (the hop closest to us),
- * falling back to X-Real-IP. Only IP-ish characters are allowed through.
+ *
+ * Only when `trustProxy` is true (TRUST_PROXY=true: the UI sits behind a
+ * reverse proxy that appends the real client address) is the incoming header
+ * honoured: the right-most entry (the hop closest to us) is used, falling back
+ * to X-Real-IP. Otherwise returns null so client-supplied XFF never reaches the
+ * API rate limiter. Next.js route handlers expose no socket address (Next only
+ * fills X-Forwarded-For with it when the client sent none, so the two cannot be
+ * told apart), hence without a trusted proxy no XFF is sent and the API
+ * rate-limits per UI container. Only IP-ish characters are allowed through.
  */
-export function clientAddress(forwardedFor: string | null, realIp: string | null): string | null {
+export function clientAddress(forwardedFor: string | null, realIp: string | null, trustProxy: boolean = false): string | null {
+    if (!trustProxy) return null;
     const candidates = (forwardedFor ?? '').split(',').map(s => s.trim()).filter(Boolean);
     const pick = candidates.length > 0 ? candidates[candidates.length - 1] : (realIp ?? '').trim();
     if (!pick || pick.length > 64 || !/^[0-9A-Fa-f.:]+$/.test(pick)) return null;
     return pick;
+}
+
+export function parseTrustProxy(raw: string | undefined): boolean {
+    return (raw ?? '').trim().toLowerCase() === 'true';
 }
 
 /** True when the declared Content-Length already exceeds the limit. */

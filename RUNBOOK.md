@@ -18,7 +18,7 @@ All commands run from the repository (or deployment) directory containing `docke
 cp .env.example .env && chmod 600 .env
 openssl rand -hex 32          # paste as RELIABILITY_API_KEY
 openssl rand -base64 24       # paste as UI_PASSWORD (or choose one)
-# set SENTRY_AUTH_TOKEN (event:read + project:read) and pin IMAGE_TAG=2.9.0
+# set SENTRY_AUTH_TOKEN (event:read + project:read) and pin IMAGE_TAG=2.11.0
 docker compose pull
 docker compose up -d
 docker compose ps             # wait for api and ui to be "healthy" (about 30 s)
@@ -29,7 +29,7 @@ Verify:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/healthz            # 200
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/                   # 401 (login required)
-curl -s -u admin:"<UI_PASSWORD>" http://localhost:3000/api/health                 # {"status":"ok",...,"version":"2.9.0"}
+curl -s -u admin:"<UI_PASSWORD>" http://localhost:3000/api/health                 # {"status":"ok",...,"version":"2.11.0"}
 ```
 
 `degraded` means `SENTRY_AUTH_TOKEN` is missing. Then open http://localhost:3000, log in, and run a Sentry analysis.
@@ -106,7 +106,7 @@ What is backed up: the `output_data` (archives, analyses, plots) and `config_dat
 make backup BACKUP_DIR=/srv/backups    # same, custom directory
 ```
 
-Backups are safe while running (atomic writes); stop the API first (`docker compose stop api`) for a fully quiescent copy. Suggested schedule: daily via cron, keep 14 days, copy off-host.
+Backups are safe while running (atomic writes); stop the API first (`docker compose stop api`) for a fully quiescent copy. Archives are created `0600` and owned by the user running the script. Suggested schedule: daily via cron, keep 14 days, copy off-host.
 
 Restore (replaces current volume contents):
 
@@ -115,6 +115,8 @@ docker compose stop
 ./scripts/restore.sh backups/reliability-modeler-<project>-<stamp>.tar.gz     # asks for confirmation; -y to skip
 docker compose up -d
 ```
+
+Before asking for confirmation, `restore.sh` checks the whole archive (gzip integrity, full tar listing, both `output/` and `config/` present) and aborts without touching the volumes if it is truncated or incomplete. It then extracts into a staging directory and only replaces the volume contents once extraction succeeded.
 
 If you run the stack under a non-default compose project name, set `COMPOSE_PROJECT_NAME` for both scripts. Test a restore at least once per quarter (restore into a throwaway project: `COMPOSE_PROJECT_NAME=rm-restore-test ./scripts/restore.sh <archive> -y`).
 
@@ -131,10 +133,10 @@ If you run the stack under a non-default compose project name, set `COMPOSE_PROJ
 | `/health` 503 `error`, `config_readable: false` | `config_data` volume missing/corrupt or wrong ownership | `docker compose exec api ls -l /app/config`; files must be readable by uid 10001. Restore config from backup, or remove the bad file to re-seed defaults |
 | `/health` 503 `error`, `output_writable: false` | Output volume full or not owned by uid 10001 | Check disk space (`docker system df -v`); fix ownership: `docker run --rm -v <project>_output_data:/d busybox:1.37 chown -R 10001:10001 /d` |
 | 413 "Request body too large" | Body above `MAX_BODY_BYTES` (API) or 1 MiB (proxy), usually a huge taxonomy | Shrink the payload; raise `MAX_BODY_BYTES` only if justified (the proxy limit is fixed at 1 MiB) |
-| 429 "Too many requests" | More than `RATE_LIMIT_PER_MINUTE` per client IP (the proxy forwards the real client IP) | Wait a minute; raise `RATE_LIMIT_PER_MINUTE` if legitimate. If it is Sentry's 429, see SUPPORT.md section 7 |
+| 429 "Too many requests" | More than `RATE_LIMIT_PER_MINUTE` per client IP (the proxy forwards the client's socket address) | Wait a minute; raise `RATE_LIMIT_PER_MINUTE` if legitimate. Behind a reverse proxy every user shares its IP: set `TRUST_PROXY=true` so its `X-Forwarded-For` is used. If it is Sentry's 429, see SUPPORT.md section 7 |
 | Analysis fails with timeout (504 / "Analysis timed out") | Analysis exceeded `ANALYSIS_TIMEOUT_SECONDS` (large org, "all projects") | Narrow the window or project; raise `ANALYSIS_TIMEOUT_SECONDS` and keep `PROXY_TIMEOUT_MS` above it (in ms) |
 | UI shows a proxy timeout / 504 while API logs success | `PROXY_TIMEOUT_MS` below analysis time | Raise `PROXY_TIMEOUT_MS` |
-| Container `unhealthy` / UI stuck in "created" | API health check failing, so `ui` waits (depends_on healthy) | `docker compose ps`; `docker inspect --format '{{json .State.Health}}' <container>`; `docker compose logs api`. Common: OOM kill (raise memory limit), bad env value, volume permissions |
+| Container `unhealthy` / UI stuck in "created" | API health check failing, so `ui` waits (depends_on healthy) | `docker compose ps`; `docker inspect --format '{{json .State.Health}}' <container>`; `docker compose logs api`. Common: OOM kill (raise `API_MEMORY`/`UI_MEMORY`), bad env value, volume permissions. "range of CPUs is from ...": `API_CPUS`/`UI_CPUS` exceed the host's CPUs |
 | Container restarting repeatedly | Crash on startup or OOM | `docker compose logs --tail=200 <svc>`; `docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' <container>` |
 | Taxonomy edits lost after redeploy | `config_data` volume removed (`down -v`) or k8s PVC not mounted at `/app/config` | Restore from backup; never use `down -v` in production |
 
@@ -163,7 +165,7 @@ To correlate a user report: ask for the `X-Request-ID` response header (browser 
 3. Make sure CI is green on `main` (tests, audits, Docker smoke test). Optionally locally: `make test build smoke`.
 4. Commit, then tag: `git tag v<version> && git push origin v<version>`.
 5. Publish images (multi-arch `linux/amd64` + `linux/arm64`, tags `:<version>` and `:latest`), either:
-   - **CI**: the tag push triggers `.github/workflows/release.yml` (requires repository secrets `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`; it fails if the tag does not match `__version__`), or run it manually from the Actions tab; or
-   - **Locally**: `docker login && make push` (asks for confirmation).
+   - **CI**: the tag push triggers `.github/workflows/release.yml` (requires repository secrets `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`; it fails if the tag does not match `__version__`, and runs the full test suite before pushing), or run it manually from the Actions tab (only from `main` or a `v*` tag; other branches are refused); or
+   - **Locally**: `docker login && make push` (asks for confirmation; other namespace: `make push DOCKERHUB_USERNAME=<you>`).
 6. Verify: `docker buildx imagetools inspect trustaldo/reliability-modeler-api:<version>` lists both platforms.
 7. Deploy with the upgrade procedure (section 2).

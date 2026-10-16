@@ -140,7 +140,7 @@ class TestLogsEndpoint:
 class TestTrendsEndpoint:
     def test_trends_returns_valid_response(self):
         data = get("/trends").json()
-        assert isinstance(data["runs"], list) and "trend" in data
+        assert isinstance(data["runs"], list) and isinstance(data["groups"], list) and "trend" in data
 
 
 @requires_api

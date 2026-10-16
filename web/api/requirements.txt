@@ -1,4 +1,3 @@
-# Runtime dependencies (direct). Keep in sync with the root requirements.txt.
 # Full transitive pins (Python 3.13): requirements.lock
 fastapi==0.141.1
 uvicorn==0.52.1

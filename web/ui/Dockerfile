@@ -26,7 +26,8 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     UI_USERNAME=admin \
-    PROXY_TIMEOUT_MS=130000
+    PROXY_TIMEOUT_MS=250000 \
+    TRUST_PROXY=false
 
 RUN addgroup --system --gid 1001 nodejs \
  && adduser --system --uid 1001 nextjs

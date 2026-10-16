@@ -9,6 +9,7 @@ import {
     isAbortError,
     isAllowedMethod,
     parseTimeoutMs,
+    parseTrustProxy,
     pickResponseHeaders,
     readBodyWithLimit,
     resolveRequestId,
@@ -50,13 +51,25 @@ async function proxy(req: NextRequest): Promise<Response> {
     if (contentType) headers.set('Content-Type', contentType);
     const accept = req.headers.get('accept');
     if (accept) headers.set('Accept', accept);
-    const client = clientAddress(req.headers.get('x-forwarded-for'), req.headers.get('x-real-ip'));
+    // Client-supplied XFF is ignored unless TRUST_PROXY=true (see clientAddress).
+    const client = clientAddress(
+        req.headers.get('x-forwarded-for'),
+        req.headers.get('x-real-ip'),
+        parseTrustProxy(process.env.TRUST_PROXY),
+    );
     if (client) headers.set('X-Forwarded-For', client);
 
     let body: ArrayBuffer | undefined;
     if (method === 'POST') {
-        if (contentLengthTooLarge(req.headers.get('content-length'))) {
+        const contentLength = req.headers.get('content-length');
+        if (contentLengthTooLarge(contentLength)) {
             return errorResponse(413, `Request body exceeds ${MAX_BODY_BYTES} bytes`, requestId);
+        }
+        // next.config.ts caps the body Next buffers for proxy.ts and silently drops the
+        // chunk that crosses the cap, so an oversized chunked upload would arrive here
+        // truncated (under the limit). Require a declared length instead.
+        if (!contentLength && req.headers.get('transfer-encoding')) {
+            return errorResponse(411, 'Content-Length required', requestId);
         }
         try {
             body = await readBodyWithLimit(req.body);

@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import secrets
-import shutil
 import sys
 import threading
 import time
@@ -49,7 +48,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from modeler import __version__
 from modeler import config as rm_config
 from modeler.data import TaxonomyError, load_fault_categories, parse_fault_categories
-from modeler.graphs import generate_graph_insights
+from modeler.graphs import build_failure_graphs, generate_graph_insights
 from modeler.logutil import configure_logging, request_id_var
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
 from modeler.plots import plot_reliability_growth, plot_failure_intensity, plot_categories
@@ -471,7 +470,11 @@ class ConfigUpdate(BaseModel):
             if '[' not in stripped or not stripped.endswith(']'):
                 raise ValueError(f"Invalid taxonomy format on line {lineno}. "
                                  "Each line must be: Category [keyword1, keyword2]")
-        if not parse_fault_categories(v):
+        try:
+            categories = parse_fault_categories(v)
+        except TaxonomyError as e:
+            raise ValueError(str(e))
+        if not categories:
             raise ValueError("Taxonomy must define at least one category")
         return v
 
@@ -604,34 +607,23 @@ async def prune_logs(retention_days: Optional[int] = None):
     }
 
 
-@app.get("/trends")
-async def get_trends():
-    """
-    Compare MTBF, failure rate, and total failures across all archived analysis runs.
-    Returns time-series data suitable for trend-line charts.
-    """
-    entries = await asyncio.to_thread(_read_json_files, rm_config.logs_dir())
-    entries.sort(key=lambda pe: pe[0].stat().st_mtime if pe[0].exists() else 0)
+def _mtbf_and_rate(total_failures, duration_hours) -> Tuple[Optional[float], Optional[float]]:
+    """MTBF (h) and failure rate (/h) for an archived run, or (None, None) when
+    they are not meaningful (no duration, or fewer than 2 failures)."""
+    try:
+        tf = float(total_failures or 0)
+        dh = float(duration_hours or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if dh <= 0 or tf < 2:
+        return None, None
+    return round(dh / tf, 4), round(tf / dh, 4)
 
-    runs = []
-    for path, entry in entries:
-        summary = entry.get("summary") or {}
-        tf = summary.get("total_failures", 0) or 0
-        dh = summary.get("duration_hours", 0) or 0
-        if tf > 0 and dh > 0:
-            runs.append({
-                "id": entry.get("id", path.stem),
-                "date": entry.get("date", ""),
-                "file": entry.get("file", ""),
-                "total_failures": tf,
-                "duration_hours": round(dh, 2),
-                "mtbf_hours": round(dh / tf, 4),
-                "failure_rate_per_hour": round(tf / dh, 4),
-            })
 
+def _trend_of(runs: List[dict]) -> dict:
+    """Trend verdict and first->last change for runs of one source (oldest first)."""
     if len(runs) < 2:
-        return {"runs": runs, "trend": "insufficient_data" if len(runs) == 0 else "single_run"}
-
+        return {"trend": "insufficient_data" if not runs else "single_run"}
     first_mtbf = runs[0]["mtbf_hours"]
     last_mtbf = runs[-1]["mtbf_hours"]
     if last_mtbf > first_mtbf * 1.05:
@@ -640,18 +632,62 @@ async def get_trends():
         trend = "degrading"
     else:
         trend = "stable"
-
-    mtbf_change_pct = round((last_mtbf - first_mtbf) / max(0.001, first_mtbf) * 100, 1)
-    rate_change_pct = round((runs[-1]["failure_rate_per_hour"] - runs[0]["failure_rate_per_hour"])
-                            / max(0.001, runs[0]["failure_rate_per_hour"]) * 100, 1)
-
     return {
-        "runs": runs,
         "trend": trend,
-        "mtbf_change_pct": mtbf_change_pct,
-        "rate_change_pct": rate_change_pct,
-        "num_runs": len(runs),
+        "mtbf_change_pct": round((last_mtbf - first_mtbf) / max(0.001, first_mtbf) * 100, 1),
+        "rate_change_pct": round((runs[-1]["failure_rate_per_hour"] - runs[0]["failure_rate_per_hour"])
+                                 / max(0.001, runs[0]["failure_rate_per_hour"]) * 100, 1),
     }
+
+
+@app.get("/trends")
+async def get_trends():
+    """
+    Compare MTBF, failure rate, and total failures across archived analysis runs.
+
+    Runs are grouped by source (the archive entry's ``file``, e.g.
+    ``sentry://org/project (30d)``) and each group gets its own trend, since
+    comparing different projects or windows is meaningless. The top-level
+    trend keys describe the group of the most recent run; ``runs`` lists all.
+    """
+    entries = await asyncio.to_thread(_read_json_files, rm_config.logs_dir())
+    entries.sort(key=lambda pe: pe[0].stat().st_mtime if pe[0].exists() else 0)
+
+    runs = []
+    groups: Dict[str, List[dict]] = {}
+    for path, entry in entries:
+        summary = entry.get("summary") or {}
+        tf = summary.get("total_failures", 0) or 0
+        dh = summary.get("duration_hours", 0) or 0
+        mtbf, rate = _mtbf_and_rate(tf, dh)
+        if mtbf is None:
+            continue
+        run = {
+            "id": entry.get("id", path.stem),
+            "date": entry.get("date", ""),
+            "file": str(entry.get("file", "")),
+            "total_failures": tf,
+            "duration_hours": round(dh, 2),
+            "mtbf_hours": mtbf,
+            "failure_rate_per_hour": rate,
+        }
+        runs.append(run)
+        group = groups.pop(run["file"], [])
+        group.append(run)
+        groups[run["file"]] = group
+
+    # dicts keep insertion order, so re-inserting on each run leaves the source
+    # with the most recent run last; list groups most recently active first.
+    group_list = [{"file": f, "runs": g, "num_runs": len(g), **_trend_of(g)}
+                  for f, g in reversed(list(groups.items()))]
+
+    body = {"groups": group_list, "runs": runs}
+    if not runs:
+        body["trend"] = "insufficient_data"
+        return body
+    latest = group_list[0]
+    body.update({k: v for k, v in latest.items() if k not in ("file", "runs")})
+    return body
 
 
 def _safe_child(directory: Path, name: str) -> Path:
@@ -685,8 +721,9 @@ async def get_html_report(analysis_id: str):
     summary = entry.get("summary") or {}
     tf = summary.get("total_failures", 0) or 0
     dh = summary.get("duration_hours", 0) or 0
-    mtbf = round(dh / max(1, tf), 2)
-    failure_rate = round(tf / max(0.01, dh), 2)
+    mtbf_v, rate_v = _mtbf_and_rate(tf, dh)
+    mtbf = f"{mtbf_v:.2f}h" if mtbf_v is not None else "n/a"
+    failure_rate = f"{rate_v:.2f}/h" if rate_v is not None else "n/a"
     safe_file = _html.escape(str(entry.get('file', 'N/A')))
     safe_date = _html.escape(str(entry.get('date', 'N/A')))
     safe_id = _html.escape(analysis_id)
@@ -733,8 +770,8 @@ async def get_html_report(analysis_id: str):
 
 <div class="kpi-grid">
   <div class="kpi"><div class="value">{tf}</div><div class="label">Total Failures</div></div>
-  <div class="kpi"><div class="value">{mtbf}h</div><div class="label">MTBF</div></div>
-  <div class="kpi"><div class="value">{failure_rate}/h</div><div class="label">Failure Rate</div></div>
+  <div class="kpi"><div class="value">{mtbf}</div><div class="label">MTBF</div></div>
+  <div class="kpi"><div class="value">{failure_rate}</div><div class="label">Failure Rate</div></div>
   <div class="kpi"><div class="value">{dh}h</div><div class="label">Duration</div></div>
 </div>
 
@@ -744,8 +781,8 @@ async def get_html_report(analysis_id: str):
     This report presents the results of a software reliability growth analysis
     conducted on <strong>{float(dh):.1f} hours</strong> of failure data containing
     <strong>{tf} incidents</strong>. The Mean Time Between Failures (MTBF) is
-    <strong>{mtbf} hours</strong> with a failure rate of
-    <strong>{failure_rate} failures per hour</strong>.
+    <strong>{mtbf}</strong> with a failure rate of
+    <strong>{failure_rate}</strong>.
   </p>
   <p style="margin-top: 12px;">
     This report was generated by the Reliability Modeler — an internal-use tool
@@ -818,8 +855,33 @@ def new_analysis_id(now: Optional[datetime] = None) -> str:
     return f"AN-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
 
 
-def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dict:
-    """Core analysis (CPU-bound, runs in a worker thread): fit models, plot, archive, graph."""
+class AnalysisCancelled(Exception):
+    """Raised inside the analysis worker once its request has timed out."""
+
+
+def _checkpoint(cancel_event: Optional[threading.Event], stage: str) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise AnalysisCancelled(stage)
+
+
+CATEGORIZED_RESPONSE_LIMIT = 100  # most recent categorized events returned inline
+
+
+def _run_analysis(t, categorized, t0, filename: str, future_hours: float,
+                  cancel_event: Optional[threading.Event] = None) -> Optional[dict]:
+    """Core analysis (CPU-bound, runs in a worker thread): fit models, plot, graph, archive.
+
+    ``cancel_event`` is checked between steps; once it is set (the request
+    timed out) the run stops and nothing is archived. Returns None then.
+    """
+    try:
+        return _run_analysis_steps(t, categorized, t0, filename, future_hours, cancel_event)
+    except AnalysisCancelled as e:
+        logger.warning("Analysis of %s cancelled after timeout (before %s); nothing archived", filename, e)
+        return None
+
+
+def _run_analysis_steps(t, categorized, t0, filename, future_hours, cancel_event) -> dict:
     settings = load_persistent_settings()
 
     T = float(t[-1])
@@ -829,23 +891,24 @@ def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dic
     results_list = []
     curves = {}
     curves_intensity = {}
-    fit_data = {}
+    names = {}
 
     for m in ['go', 'mo']:
+        _checkpoint(cancel_event, f"{m} fit")
         try:
-            params, ll, se, total_exp = fit_model(t, T, model_name=m, method=settings.optimization_method,
-                                                  tol=settings.tolerance)
+            params, ll, total_exp = fit_model(t, T, model_name=m, method=settings.optimization_method,
+                                              tol=settings.tolerance)
         except Exception:
             logger.exception("Model fitting failed for %s", m)
             continue
         if params is None:
-            logger.warning("Model %s failed to converge", m)
+            logger.warning("No valid %s fit for this data", m)
             continue
 
         name = "Goel-Okumoto" if m == 'go' else "Musa-Okumoto"
         curves[m] = go_mu(tt, params) if m == 'go' else mo_mu(tt, params)
         curves_intensity[m] = go_intensity(tt, params) if m == 'go' else mo_intensity(tt, params)
-        fit_data[m] = (params, ll, se, name)
+        names[m] = name
 
         if m == 'go':
             param_map = {"a": float(params[0]), "b": float(params[1])}
@@ -860,27 +923,26 @@ def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dic
             "parameters": param_map,
         })
 
+    _checkpoint(cancel_event, "plots")
     log_id = new_analysis_id()
     temp_dir = rm_config.temp_plots_dir()
     temp_dir.mkdir(parents=True, exist_ok=True)
     prefix_name = f"plot_{uuid.uuid4().hex}"
     prefix = str(temp_dir / prefix_name)
     plots_b64 = {}
+    report_plot_bytes = None
     try:
-        rel_plot = plot_reliability_growth(t, n, curves, fit_data, None, tt, prefix)
-        intensity_plot = plot_failure_intensity(tt, curves_intensity, None, prefix)
+        rel_plot = plot_reliability_growth(t, n, curves, names, tt, prefix)
+        intensity_plot = plot_failure_intensity(tt, curves_intensity, prefix)
         cat_plot = plot_categories(categorized, prefix)
-
-        # Persist the reliability plot so the HTML report can embed it later
-        if rel_plot and os.path.exists(rel_plot):
-            report_plot_dir = rm_config.plots_dir()
-            report_plot_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(rel_plot, report_plot_dir / f"{log_id}_reliability.png")
 
         for name, path in [("reliability", rel_plot), ("intensity", intensity_plot), ("categories", cat_plot)]:
             if path and os.path.exists(path):
                 with open(path, "rb") as f:
-                    plots_b64[name] = base64.b64encode(f.read()).decode('utf-8')
+                    data = f.read()
+                plots_b64[name] = base64.b64encode(data).decode('utf-8')
+                if name == "reliability":
+                    report_plot_bytes = data
     finally:
         for leftover in temp_dir.glob(f"{prefix_name}*"):
             try:
@@ -888,11 +950,8 @@ def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dic
             except OSError:
                 logger.warning("Could not remove temp plot %s", leftover, exc_info=True)
 
-    save_to_archive(log_id, filename, {"total_failures": n, "duration_hours": round(T, 2)})
-
-    # Store categorized data for GraphQL graph queries and prime the report cache
-    gql.store_analysis_data(log_id, categorized)
-    graph_report = gql.get_failure_report(log_id, categorized=categorized)
+    _checkpoint(cancel_event, "graph analysis")
+    graph_report = build_failure_graphs(categorized)
     graph_insights = generate_graph_insights(graph_report) if graph_report else []
     graph_summary = None
     if graph_report:
@@ -911,6 +970,16 @@ def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dic
             "graph_json": graph_report.graph_json,
         }
 
+    _checkpoint(cancel_event, "archive")
+    # Persist the reliability plot so the HTML report can embed it later
+    if report_plot_bytes:
+        report_plot_dir = rm_config.plots_dir()
+        report_plot_dir.mkdir(parents=True, exist_ok=True)
+        (report_plot_dir / f"{log_id}_reliability.png").write_bytes(report_plot_bytes)
+    save_to_archive(log_id, filename, {"total_failures": n, "duration_hours": round(T, 2)})
+    # Store categorized data for GraphQL graph queries and prime the report cache
+    gql.store_analysis_data(log_id, categorized, report=graph_report)
+
     return {
         "id": log_id,
         "summary": {
@@ -918,9 +987,12 @@ def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dic
             "duration_hours": round(T, 2),
             "start_time": t0.isoformat() if hasattr(t0, 'isoformat') else str(t0),
         },
+        "future_hours": future_hours,
         "models": results_list,
         "plots": plots_b64,
-        "categorized_failures": categorized[:100],
+        # Most recent events, still oldest -> newest.
+        "categorized_failures": categorized[-CATEGORIZED_RESPONSE_LIMIT:],
+        "categorized_total": len(categorized),
         "graph_insights": graph_insights,
         "graph_report": graph_summary,
     }
@@ -929,12 +1001,14 @@ def _run_analysis(t, categorized, t0, filename: str, future_hours: float) -> dic
 async def _analyze(t, categorized, t0, filename: str, future_hours: float) -> dict:
     """Run the analysis off the event loop with a real timeout."""
     started = time.perf_counter()
+    cancel = threading.Event()
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(_run_analysis, t, categorized, t0, filename, future_hours),
+            asyncio.to_thread(_run_analysis, t, categorized, t0, filename, future_hours, cancel),
             timeout=ANALYSIS_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
+        cancel.set()  # stop the worker at its next step; it will not archive
         metrics.observe_analysis("timeout", time.perf_counter() - started)
         logger.error("Analysis of %s timed out after %ss", filename, ANALYSIS_TIMEOUT_SECONDS)
         raise HTTPException(status_code=504, detail="Analysis timed out. Try a narrower time window.")
@@ -975,9 +1049,10 @@ async def ingest_sentry(payload: SentryIngestRequest):
     settings = load_persistent_settings()
     cancel = threading.Event()
     project_counts: Dict[str, int] = {}
+    truncated = False
     try:
         if project == "all":
-            t, categorized, t0, _, project_counts = await asyncio.wait_for(
+            t, categorized, t0, _, project_counts, truncated = await asyncio.wait_for(
                 asyncio.to_thread(load_sentry_failures_all, org, auth_token, config_path, days,
                                   settings.multi_label, cancel_event=cancel),
                 timeout=ANALYSIS_TIMEOUT_SECONDS,
@@ -1010,6 +1085,7 @@ async def ingest_sentry(payload: SentryIngestRequest):
         raise HTTPException(status_code=400, detail=f"No failure events found in Sentry for {org}/{project} in the last {days} days")
 
     result = await _analyze(t, categorized, t0, display_name, payload.future_hours)
+    result["truncated"] = bool(truncated)
     if project_counts:
         result["projects"] = dict(sorted(project_counts.items(), key=lambda kv: kv[1], reverse=True))
     return result

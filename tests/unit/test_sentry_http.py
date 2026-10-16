@@ -244,7 +244,7 @@ def test_all_projects_aggregates_and_skips_failures(fake, taxonomy, caplog):
                                 {"slug": "gone"}, {"name": "no slug"}], {}))
     fake.route(EVENTS, (200, [_event(0), _event(2)], {}))
     fake.route("/api/0/projects/acme/api/events/", (200, [_event(1, "http timeout"), {"bad": 1}], {}))
-    t, cat_list, t0, cats, counts = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
+    t, cat_list, t0, cats, counts, truncated = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
     assert counts == {"Web": 2, "API": 1}
     assert list(t) == [0.0, 1.0, 2.0]
     assert cat_list[1][3].startswith("[project: API]")
@@ -254,21 +254,21 @@ def test_all_projects_aggregates_and_skips_failures(fake, taxonomy, caplog):
 def test_all_projects_caps_count(fake, taxonomy, caplog):
     fake.route(PROJECTS, (200, [{"slug": f"p{i}"} for i in range(3)], {}))
     fake.route("/api/0/projects/acme/p0/events/", (200, [_event(0)], {}))
-    *_, counts = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base, max_projects=1)
+    *_, counts, _truncated = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base, max_projects=1)
     assert counts == {"p0": 1}
     assert "only the first 1" in caplog.text
 
 
 def test_all_projects_empty_org(fake, taxonomy):
     fake.route(PROJECTS, (200, [], {}))
-    t, cat_list, t0, cats, counts = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
+    t, cat_list, t0, cats, counts, truncated = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
     assert len(t) == 0 and counts == {}
 
 
 def test_all_projects_no_events(fake, taxonomy):
     fake.route(PROJECTS, (200, [{"slug": "web"}], {}))
     fake.route(EVENTS, (200, [], {}))
-    t, cat_list, t0, cats, counts = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
+    t, cat_list, t0, cats, counts, truncated = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
     assert len(t) == 0 and counts == {"web": 0}
 
 
@@ -278,7 +278,7 @@ def test_all_projects_cancel_propagates(fake, taxonomy):
 
     def set_after_first(*a, **k):
         ev.set()
-        return []
+        return [], False
     with pytest.raises(SentryCancelled):
         import unittest.mock as m
         with m.patch.object(sentry, "_fetch_project_events", side_effect=set_after_first):
@@ -298,3 +298,27 @@ def test_retry_delay_parsing():
 def test_extract_cursor_results_false():
     link = '<https://x/?cursor=1:0:0>; rel="next"; results="false"; cursor="1:0:0"'
     assert sentry._extract_next_cursor(link) is None
+
+
+def test_all_projects_truncation_trims_to_common_start(fake, taxonomy, monkeypatch):
+    """A project that hit the event cap only covers recent history; every project
+    is trimmed to start at its oldest kept event so the merged timeline is not skewed."""
+    monkeypatch.setattr(sentry, "MAX_PAGES", 1)
+    api_events = "/api/0/projects/acme/api/events/"
+    fake.route(PROJECTS, (200, [{"slug": "web", "name": "Web"}, {"slug": "api", "name": "API"}], {}))
+    # web: complete history 0..9h; api: capped (more pages exist), newest first, oldest kept = 5h
+    fake.route(EVENTS, (200, [_event(i) for i in range(10)], {}))
+    fake.route(api_events, (200, [_event(i, "http 500") for i in (9, 7, 5)], fake.link(api_events, "c1")))
+    t, cat_list, t0, cats, counts, truncated = load_sentry_failures_all("acme", "tok", taxonomy,
+                                                                         base_url=fake.base)
+    assert truncated is True
+    assert counts == {"Web": 5, "API": 3}
+    assert t0 == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    assert list(t)[0] == 0.0 and len(t) == 8
+
+
+def test_all_projects_not_truncated(fake, taxonomy):
+    fake.route(PROJECTS, (200, [{"slug": "web"}], {}))
+    fake.route(EVENTS, (200, [_event(0), _event(1)], {}))
+    *_, counts, truncated = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
+    assert truncated is False and counts == {"web": 2}

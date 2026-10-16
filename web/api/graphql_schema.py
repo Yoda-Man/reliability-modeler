@@ -66,7 +66,7 @@ class CooccurrenceEdgeType(graphene.ObjectType):
     source = graphene.String()
     target = graphene.String()
     weight = graphene.Int(description="Co-occurrence count")
-    normalized_weight = graphene.Float(description="Jaccard similarity (0-1)")
+    normalized_weight = graphene.Float(description="0-1: Jaccard similarity, or (single-label data) share of all temporal-proximity pairs")
 
 
 class GraphMetricsType(graphene.ObjectType):
@@ -130,9 +130,12 @@ CASCADE_WINDOW_RANGE = (1.0, 720.0)
 MIN_COOCCURRENCE_RANGE = (1, 1000)
 LIMIT_RANGE = (1, 100)
 MAX_QUERY_DEPTH = 8
-MEMORY_CACHE_SIZE = 100       # categorized analyses kept in memory
+MEMORY_CACHE_SIZE = 100       # freshly stored analyses kept in memory (entry cap)
+MEMORY_CACHE_MAX_EVENTS = 500_000  # ... and total events across them (size cap)
 REPORT_CACHE_SIZE = 64        # built graph reports kept in memory
 CROSS_ANALYSIS_CAP = 50       # most recent analyses examined by keystoneCategoriesAcross
+MAX_GRAPH_FIELDS = 10         # graph-building root fields (incl. aliases) allowed per request
+GRAPH_FIELDS = frozenset({"failureGraph", "keystoneCategories", "cascadeChains", "keystoneCategoriesAcross"})
 
 
 class GraphQLUserError(Exception):
@@ -252,12 +255,25 @@ ANALYSIS_ID_RE = re.compile(r'^AN-\d{8}-\d{6}(-[0-9a-f]{6})?$')
 
 
 class _LRU:
-    """Tiny thread-safe bounded LRU mapping."""
+    """Tiny thread-safe bounded LRU mapping.
 
-    def __init__(self, maxsize: int):
+    Bounded by entry count (``maxsize``) and, when ``weigh`` is given, by the
+    total weight of the values (``max_weight``), evicting least recently used
+    entries first. A single value heavier than ``max_weight`` is not kept.
+    """
+
+    def __init__(self, maxsize: int, weigh=None, max_weight: Optional[int] = None):
         self.maxsize = maxsize
+        self.weigh = weigh
+        self.max_weight = max_weight
         self._data: "OrderedDict[Any, Any]" = OrderedDict()
+        self._weights: Dict[Any, int] = {}
+        self._total = 0
         self._lock = threading.Lock()
+
+    def _pop(self, key) -> None:
+        del self._data[key]
+        self._total -= self._weights.pop(key, 0)
 
     def get(self, key):
         with self._lock:
@@ -268,15 +284,22 @@ class _LRU:
 
     def put(self, key, value) -> None:
         with self._lock:
+            if key in self._data:
+                self._pop(key)
+            weight = self.weigh(value) if self.weigh else 0
+            if self.max_weight is not None and weight > self.max_weight:
+                return
             self._data[key] = value
-            self._data.move_to_end(key)
-            while len(self._data) > self.maxsize:
-                self._data.popitem(last=False)
+            self._weights[key] = weight
+            self._total += weight
+            while len(self._data) > self.maxsize or (
+                    self.max_weight is not None and self._total > self.max_weight):
+                self._pop(next(iter(self._data)))
 
     def discard_where(self, predicate) -> None:
         with self._lock:
             for k in [k for k in self._data if predicate(k)]:
-                del self._data[k]
+                self._pop(k)
 
     def keys(self) -> List[Any]:
         with self._lock:
@@ -285,6 +308,8 @@ class _LRU:
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+            self._weights.clear()
+            self._total = 0
 
     def __contains__(self, key) -> bool:
         with self._lock:
@@ -295,9 +320,11 @@ class _LRU:
             return len(self._data)
 
 
-# Categorized data keyed by analysis_id (persisted to OUTPUT_DIR/analyses/{id}.json
-# so GraphQL can query historical analyses across restarts).
-_analysis_store = _LRU(MEMORY_CACHE_SIZE)
+# Freshly stored categorized data keyed by analysis_id, bounded by total event
+# count. Everything is also persisted to OUTPUT_DIR/analyses/{id}.json so GraphQL
+# can query historical analyses across restarts; disk reads are NOT cached here
+# (the built reports are, in _report_cache).
+_analysis_store = _LRU(MEMORY_CACHE_SIZE, weigh=len, max_weight=MEMORY_CACHE_MAX_EVENTS)
 # Built graph reports keyed by (analysis_id, cascade_window_hours, min_cooccurrence).
 _report_cache = _LRU(REPORT_CACHE_SIZE)
 
@@ -306,10 +333,21 @@ def _analysis_path(analysis_id: str):
     return rm_config.analyses_dir() / f"{analysis_id}.json"
 
 
-def store_analysis_data(analysis_id: str, categorized_list: list) -> None:
-    """Store categorized failure data (memory + disk) for later GraphQL queries."""
+def _report_key(analysis_id: str, cascade_window_hours: float = 2.0, min_cooccurrence: int = 3):
+    return (analysis_id, float(cascade_window_hours), int(min_cooccurrence))
+
+
+def store_analysis_data(analysis_id: str, categorized_list: list,
+                        report: Optional[FailureGraphReport] = None) -> None:
+    """Store categorized failure data (memory + disk) for later GraphQL queries.
+
+    ``report``, if given, is the already-built report for the default
+    parameters and primes the report cache.
+    """
     _analysis_store.put(analysis_id, categorized_list)
     _report_cache.discard_where(lambda k: k[0] == analysis_id)
+    if report is not None:
+        _report_cache.put(_report_key(analysis_id), report)
     try:
         rm_config.atomic_write_json(_analysis_path(analysis_id), [list(r) for r in categorized_list])
     except (OSError, TypeError, ValueError):
@@ -350,7 +388,6 @@ def get_categorized_data(analysis_id: str) -> Optional[list]:
     if not isinstance(data, list):
         logger.warning("Analysis file %s has unexpected shape (%s); ignoring it", disk_path, type(data).__name__)
         return None
-    _analysis_store.put(analysis_id, data)  # warm the (bounded) cache
     return data
 
 
@@ -361,7 +398,7 @@ def get_failure_report(
     categorized: Optional[list] = None,
 ) -> Optional[FailureGraphReport]:
     """Return the graph report for an analysis, building it at most once per parameter set."""
-    key = (analysis_id, float(cascade_window_hours), int(min_cooccurrence))
+    key = _report_key(analysis_id, cascade_window_hours, min_cooccurrence)
     cached = _report_cache.get(key)
     if cached is not None:
         return cached
@@ -402,7 +439,26 @@ class NoIntrospection(ValidationRule):
             self.report_error(GraphQLError(f"Cannot query '{name}': introspection is disabled.", node))
 
 
-_EXTRA_RULES = (NoIntrospection, depth_limit_validator(max_depth=MAX_QUERY_DEPTH))
+class GraphFieldLimit(ValidationRule):
+    """Cap graph-building root fields per document (aliases count separately),
+    so one request cannot fan out into many graph builds."""
+
+    def __init__(self, context):
+        super().__init__(context)
+        self.count = 0
+
+    def enter_field(self, node: FieldNode, *_args):
+        parent = self.context.get_parent_type()
+        if parent is None or parent.name != "Query" or node.name.value not in GRAPH_FIELDS:
+            return
+        self.count += 1
+        if self.count == MAX_GRAPH_FIELDS + 1:
+            self.report_error(GraphQLError(
+                f"Too many graph fields in one request (max {MAX_GRAPH_FIELDS} of "
+                f"{', '.join(sorted(GRAPH_FIELDS))}, aliases included).", node))
+
+
+_EXTRA_RULES = (NoIntrospection, depth_limit_validator(max_depth=MAX_QUERY_DEPTH), GraphFieldLimit)
 
 
 def _sanitize_error(err: GraphQLError) -> str:

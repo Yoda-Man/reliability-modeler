@@ -11,6 +11,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 VERSION            := $(shell sed -nE 's/^__version__[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/p' modeler/__init__.py)
+# Override per call (.env is not read): make push DOCKERHUB_USERNAME=<you>
 DOCKERHUB_USERNAME ?= trustaldo
 REGISTRY           ?= docker.io
 PREFIX             := $(REGISTRY)/$(DOCKERHUB_USERNAME)/reliability-modeler

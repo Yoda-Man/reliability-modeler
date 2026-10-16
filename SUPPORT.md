@@ -2,7 +2,7 @@
 
 Reference for operators: architecture, persistence, monitoring, logging, troubleshooting and capacity. Step-by-step procedures (deploy, upgrade, rollback, secret rotation, backup/restore, incident table) are in [`RUNBOOK.md`](RUNBOOK.md).
 
-Applies to version **2.9.0**.
+Applies to version **2.11.0**.
 
 ## 1. Service overview
 
@@ -14,7 +14,7 @@ Browser ──Basic auth──▶ UI (Next.js) :3000 ──/api/* proxy──▶
                                                                     └── /app/output  (volume output_data)
 ```
 
-- **UI**: Next.js server. Enforces HTTP Basic auth (`UI_USERNAME`/`UI_PASSWORD`) on every route except `/healthz`. Proxies `/api/*` to `API_URL` and injects `RELIABILITY_API_KEY` server-side. Only GET/POST are proxied, bodies are limited to 1 MiB, timeout `PROXY_TIMEOUT_MS` (default 130 s).
+- **UI**: Next.js server. Enforces HTTP Basic auth (`UI_USERNAME`/`UI_PASSWORD`) on every route except `/healthz`. Proxies `/api/*` to `API_URL` and injects `RELIABILITY_API_KEY` server-side. Only GET/POST are proxied, bodies are limited to 1 MiB, timeout `PROXY_TIMEOUT_MS` (default 250 s). The client address forwarded to the API (`X-Forwarded-For`, used for per-IP rate limiting) is the socket address; an incoming `X-Forwarded-For` is honoured only with `TRUST_PROXY=true` (set it only behind a reverse proxy that sets that header itself).
 - **API**: Python 3.13 FastAPI. CPU-bound (scipy fits, matplotlib rendering); analysis runs in a worker thread so `/health` stays responsive. Requires `X-API-Key` on every route except `/health` and `/health/live`.
 - **Data source**: Sentry, pulled on demand. No CSV upload, no CLI.
 - **No database**: state is files on two volumes.
@@ -75,7 +75,7 @@ UI pod: liveness/readiness `GET /healthz` on port 3000; `API_URL` pointing at th
 ```json
 {
   "status": "degraded",
-  "version": "2.9.0",
+  "version": "2.11.0",
   "timestamp": "2026-10-10T14:22:33.123456+00:00",
   "checks": {
     "output_writable": true,
@@ -186,9 +186,9 @@ All figures are **estimates** from development hardware, not load-tested guarant
 |------|----------|
 | Analysis time, ~1,000 events | 2–5 s CPU |
 | Analysis time, 5,000 events (single-project cap) | 10–30 s |
-| API memory | ~250 MB idle, ~500–800 MB peak during fitting/rendering (compose limit 1 GB) |
-| UI memory | ~100–200 MB (compose limit 512 MB) |
-| Concurrency | ~1 concurrent analysis per vCPU (compose limit 2 vCPU) |
+| API memory | ~250 MB idle, ~500–800 MB peak during fitting/rendering (compose limit `API_MEMORY`, default 1 GB) |
+| UI memory | ~100–200 MB (compose limit `UI_MEMORY`, default 512 MB) |
+| Concurrency | ~1 concurrent analysis per vCPU (compose limit `API_CPUS`, default 1 vCPU; raise on larger hosts, never above the host's CPU count) |
 | Disk per analysis | ~0.1–1 MB (archive + persisted analysis + plot) |
 | Disk at 90-day retention, 20 analyses/day | roughly 0.2–2 GB |
 

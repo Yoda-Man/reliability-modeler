@@ -4,7 +4,8 @@
  */
 
 export const API_BASE = '/api';
-export const DEFAULT_CLIENT_TIMEOUT_MS = 130_000;
+// Must exceed the UI proxy's PROXY_TIMEOUT_MS default (250s) so the proxy's 504 reaches the user.
+export const DEFAULT_CLIENT_TIMEOUT_MS = 260_000;
 
 export interface FetchOptions extends RequestInit {
     timeout?: number;

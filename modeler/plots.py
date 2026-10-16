@@ -31,16 +31,17 @@ def _save(fig: Figure, path: str) -> str:
     return path
 
 
-def plot_reliability_growth(t, n, curves, results, ensemble, tt, prefix):
+def plot_reliability_growth(t, n, curves, names, tt, prefix):
+    """Observed cumulative failures vs each fitted mean-value curve.
+
+    ``names`` maps a curve key (e.g. 'go') to its legend label.
+    """
     try:
         fig = _new_figure((10, 6))
         ax = fig.add_subplot(1, 1, 1)
         ax.plot(t, np.arange(1, n + 1), 'o', label=f'Observed ({n})', alpha=0.7)
         for m, curve in curves.items():
-            label = results[m][3] if m in results else m
-            ax.plot(tt, curve, label=label)
-        if ensemble is not None:
-            ax.plot(tt, ensemble, '--', linewidth=2.5, label='Ensemble (recommended)')
+            ax.plot(tt, curve, label=names.get(m, m))
         ax.set_xlabel('Time (hours)')
         ax.set_ylabel('Cumulative Failures')
         ax.set_title('Reliability Growth – Observed vs Predicted')
@@ -54,19 +55,17 @@ def plot_reliability_growth(t, n, curves, results, ensemble, tt, prefix):
         return None
 
 
-def plot_failure_intensity(tt, curves_intensity, ensemble_intensity, prefix):
+def plot_failure_intensity(tt, curves_intensity, prefix):
     try:
         fig = _new_figure((10, 6))
         ax = fig.add_subplot(1, 1, 1)
         for m, curve in curves_intensity.items():
             label = m.upper() if len(m) <= 2 else m
             ax.plot(tt, curve, label=f"{label} Intensity")
-        if ensemble_intensity is not None:
-            ax.plot(tt, ensemble_intensity, '--', linewidth=2.5, label='Ensemble Intensity')
         ax.set_xlabel('Time (hours)')
         ax.set_ylabel('Failures per Hour (Intensity)')
         ax.set_title('Failure Intensity over Time (Rate of Occurrence)')
-        if curves_intensity or ensemble_intensity is not None:
+        if curves_intensity:
             ax.legend()
         ax.grid(True, alpha=0.3)
         plot_path = _save(fig, f"{prefix}_intensity_plot.png")

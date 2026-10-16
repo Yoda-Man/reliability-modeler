@@ -14,7 +14,8 @@ its own server-side proxy, so the API key never reaches the browser.
 | `UI_AUTH_DISABLED` | `false` | Set to `true` to turn auth off. Only for local development. |
 | `API_URL` | `http://localhost:8000` | Base URL of the FastAPI backend (Compose sets `http://api:8000`). |
 | `RELIABILITY_API_KEY` | none | Sent to the API as `X-API-Key`. Server-side only. |
-| `PROXY_TIMEOUT_MS` | `130000` | Upstream timeout for proxied API calls. It sits a little above the API's 120 s analysis timeout. |
+| `PROXY_TIMEOUT_MS` | `250000` | Upstream timeout for proxied API calls. It covers the API's worst case (Sentry fetch ≤120 s + analysis ≤120 s). The browser client waits 260 s, so the proxy's `504` always reaches the user. |
+| `TRUST_PROXY` | `false` | Set to `true` only when the UI sits behind a reverse proxy that appends the real client address to `X-Forwarded-For`. Otherwise client-supplied `X-Forwarded-For` is ignored. |
 | `PORT` / `HOSTNAME` | `3000` / `0.0.0.0` | Listen address (Docker image defaults). |
 
 All of these are read at request time on the server. None of them is `NEXT_PUBLIC_*`.
@@ -34,12 +35,20 @@ lives in `src/lib/basicAuth.ts`.
 
 - Only `GET` and `POST` are proxied. Next answers any other method with `405`.
 - Request bodies are capped at 1 MiB, checked against `Content-Length` and
-  again while streaming. Oversized bodies get `413`.
+  again while streaming. Oversized bodies get `413`. Chunked `POST`s without a
+  `Content-Length` get `411`. `next.config.ts` also sets
+  `experimental.proxyClientMaxBodySize` to 1 MiB + 1 byte, so Next buffers at
+  most that much of a body before `src/proxy.ts` checks auth (the default is
+  10 MiB). Next silently truncates bodies at that cap, which is why chunked
+  uploads must declare a length.
 - Request and response bodies are handled as raw bytes, so binary data is safe.
 - `X-Request-ID` is forwarded when it is safe (`[A-Za-z0-9._-]{1,128}`) and
   generated otherwise. It is echoed on the response.
-- `X-Forwarded-For` carries the client address. The proxy takes the right-most
-  entry of the incoming header, or `X-Real-IP`.
+- `X-Forwarded-For` carries the client address only when `TRUST_PROXY=true`:
+  the proxy then takes the right-most entry of the incoming header, or
+  `X-Real-IP`. Otherwise no `X-Forwarded-For` is sent. Next.js route handlers
+  do not expose the socket address, so the API rate-limits all users of one UI
+  container together.
 - The proxy forwards these upstream response headers: `content-type`,
   `content-disposition`, `cache-control`, `retry-after`, `x-request-id`.
 - When the API is unreachable the proxy returns `502`. On timeout it returns

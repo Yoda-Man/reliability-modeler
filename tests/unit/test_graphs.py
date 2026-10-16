@@ -227,3 +227,44 @@ class TestGraphEdgeCases:
         import modeler.graphs as g
         monkeypatch.setattr(g, "_HAS_NETWORKX", False)
         assert build_failure_graphs(_make_categorized_list()) is None
+
+
+class TestTemporalProximityNormalisation:
+    """Single-label data falls back to temporal-proximity edges, whose counts
+    are event *pairs*; the normalised weight must still be within 0..1."""
+
+    def _alternating(self, cats=("A", "B"), n=200):
+        return [("x", i * 0.1, cats[i % len(cats)], "d") for i in range(n)]
+
+    def test_weights_within_unit_interval(self):
+        report = build_failure_graphs(self._alternating(("A", "B", "C")))
+        assert report.cooccurrence_edges
+        for e in report.cooccurrence_edges:
+            assert e.weight > 200  # far more pairs than events per category
+            assert 0.0 <= e.normalized_weight <= 1.0
+        for e in report.graph_json["edges"]:
+            assert 0.0 <= e["jaccard"] <= 1.0
+        assert sum(e.normalized_weight for e in report.cooccurrence_edges) == pytest.approx(1.0, abs=1e-3)
+
+    def test_insight_reports_neighbour_count_not_weighted_degree(self):
+        report = build_failure_graphs(self._alternating())
+        a = next(c for c in report.centrality if c.node == "A")
+        assert a.neighbors == 1 and a.degree > 1000
+        lines = [l for l in generate_graph_insights(report) if "connected to" in l]
+        assert lines and all("connected to 1 other category" in l for l in lines)
+
+    def test_multi_label_jaccard_unchanged(self):
+        data = [("x", float(i), "A, B" if i % 2 else "A", "d") for i in range(10)]
+        report = build_failure_graphs(data, min_cooccurrence=1)
+        (edge,) = report.cooccurrence_edges
+        assert edge.weight == 5 and edge.normalized_weight == pytest.approx(5 / 10)
+
+
+def test_cascade_latency_is_mean_of_gaps():
+    data = [("x", 0.0, "A", "d"), ("x", 0.5, "B", "d"), ("x", 3.0, "A", "d"), ("x", 4.5, "B", "d"),
+            ("x", 10.0, "C", "d")]
+    report = build_failure_graphs(data, cascade_window_hours=2.0)
+    edge = next(e for e in report.graph_json["cascade_edges"] if (e["source"], e["target"]) == ("A", "B"))
+    assert edge["weight"] == 2 and edge["avg_latency"] == pytest.approx(1.0)
+    chain = next(c for c in report.cascade_chains if c.chain == ["A", "B"])
+    assert chain.occurrence_count == 2 and chain.avg_latency_hours == pytest.approx(1.0)
