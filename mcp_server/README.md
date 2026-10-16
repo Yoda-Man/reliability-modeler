@@ -8,7 +8,7 @@ It is a thin client of the running stack. Every call goes through the UI proxy (
 
 | Tool | What it returns |
 |------|-----------------|
-| `list_analyses(limit, offset)` | Archived runs, newest first: summary, fitted models, MTBF, predictions |
+| `list_analyses(limit, offset)` | Archived runs, newest first: ID, date, source, total failures, duration |
 | `get_trends()` | MTBF / failure-rate trend per source (`groups`): improving, stable or degrading |
 | `list_sentry_projects(org)` | Sentry projects in an organization |
 | `run_analysis(org, project, days)` | Pulls 1–90 days of Sentry events and fits models (up to ~4 min). `truncated: true` means a project hit the per-project event cap |

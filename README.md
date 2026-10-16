@@ -1,205 +1,300 @@
-# Software Reliability Growth Modeler
+# Reliability Modeler
 
-A **Sentry-powered** web application that turns your existing error-monitoring data into reliability intelligence. It fits the **Goel-Okumoto (GO)** and **Musa-Okumoto (MO)** Non-Homogeneous Poisson Process (NHPP) models to Sentry failure events to estimate MTBF, residual faults and release readiness.
+Turn the errors you already collect in Sentry into reliability forecasts: MTBF, remaining faults and the failure patterns that drive them.
 
-Current version: **2.11.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
+[![Version](https://img.shields.io/badge/version-2.11.0-blue)](CHANGELOG.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Docker Hub](https://img.shields.io/badge/docker-trustaldo%2Freliability--modeler--api-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/trustaldo/reliability-modeler-api)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Next.js 16](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org/)
 
-> **Internal network only.** The application is designed to run behind your organisation's network boundary or VPN. It has authentication (API key + UI login) but is not hardened as an internet-facing service.
+![Dashboard](docs/screenshots/dashboard.png)
 
+> **Internal network only.** Run it behind your network boundary or VPN. It has authentication, but it is not hardened as an internet-facing service.
+>
 > **Data source: Sentry only.** There is no CSV upload, file import or CLI.
 
-## What it tells you
+## Key capabilities
 
-- **MTBF evolution**: current and projected reliability
-- **Predicted residuals**: how many latent faults likely remain
-- **Release readiness**: when the software reaches a stability threshold
-- **Keystone failures**: fault categories that drive the most downstream impact (graph centrality)
-- **Failure cascades**: errors that predictably trigger others
-- **Cross-project breakdown**: which Sentry project contributes the most failures
+**Reliability modelling**
+- Fits Goel-Okumoto (GO) and Musa-Okumoto (MO) NHPP models by maximum likelihood.
+- Reports AIC, parameters and expected total failures per model; the Dashboard picks the best (lowest AIC).
+- Dashboard KPIs: total failures, MTBF, failure rate, predicted residual faults, best model.
+- Projects cumulative failures and failure intensity over a forecast horizon you choose (1 to 100,000 hours).
+- Refuses to report an impossible fit: no growth, too little data, or a boundary optimum gives "No model could be fitted".
 
-## Quick start (Docker)
+**Failure graph analytics**
+- Co-occurrence and cascade graphs over fault categories (NetworkX).
+- Keystone categories (top 20% PageRank) and bridge categories (top 20% betweenness).
+- Recurring cascade chains with occurrence count, latency and confidence.
+- Louvain communities, graph density and plain-language insights.
+- Cross-analysis view of categories that are keystone most often.
 
-Requirements: Docker Engine 24+ with the Compose plugin, and at least 1 vCPU (see `API_CPUS` / `UI_CPUS`).
+**Sentry ingestion**
+- Pull 1 to 90 days of events from one project, or aggregate every project in an org.
+- Keyword taxonomy assigns each event a fault category (single- or multi-label).
+- Per-project and system-wide breakdowns; MTBF and failure-rate trends per source.
+
+**AI agents via MCP**
+- Stdio MCP server with five tools for Claude Code, Codex, Claude Desktop and other MCP clients.
+- Uses the UI login from the repo `.env`, so no secret goes into agent configs.
+
+**Operations**
+- Docker Compose deployment; only the UI port is published.
+- Health, readiness and Prometheus metrics; request IDs on every response.
+- Automatic retention pruning, volume backup and restore scripts, smoke test.
+- Multi-arch images (`linux/amd64`, `linux/arm64`) on Docker Hub.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/sentry.png" width="100%" alt="Sentry analysis form"><br><sub><b>Run an analysis</b>: org, project or all projects, look-back window, forecast horizon.</sub></td>
+    <td width="50%"><img src="docs/screenshots/trends.png" width="100%" alt="Reliability trends"><br><sub><b>Reliability trends</b>: MTBF and failure rate per source across runs.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/logs.png" width="100%" alt="Analysis archive"><br><sub><b>Analysis archive</b>: every completed run, searchable and paginated.</sub></td>
+    <td width="50%"><img src="docs/screenshots/config.png" width="100%" alt="Taxonomy and settings"><br><sub><b>Taxonomy and settings</b>: fault categories, multi-label tagging, solver settings.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/agents.png" width="100%" alt="Connect AI agents"><br><sub><b>Connect AI agents</b>: copyable MCP setup for each client.</sub></td>
+    <td width="50%"></td>
+  </tr>
+</table>
+
+## Quick start
+
+Requirements: Docker Engine 24+ with the Compose plugin, and at least 1 vCPU.
 
 ```bash
 cp .env.example .env
 chmod 600 .env
+```
 
-# Edit .env and set at least:
-#   RELIABILITY_API_KEY=<output of: openssl rand -hex 32>
-#   UI_PASSWORD=<a strong password>
-#   SENTRY_AUTH_TOKEN=<Sentry token with event:read + project:read>   (optional, needed to ingest)
+Set these keys in `.env`:
 
+| Key | How to get it |
+|-----|---------------|
+| `RELIABILITY_API_KEY` | `openssl rand -hex 32` (required) |
+| `UI_PASSWORD` | `openssl rand -base64 24` (required) |
+| `SENTRY_AUTH_TOKEN` | Sentry token with `event:read` and `project:read` (needed to ingest) |
+
+```bash
 docker compose up -d
 docker compose ps        # both services should become "healthy"
 ```
 
-Open **http://localhost:3000** and log in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`.
+Open **http://localhost:3000** and sign in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`. Go to **Sentry**, enter your org and project, then **Pull & Analyze**.
 
-`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing.
-
-To run a specific release, set `IMAGE_TAG` (e.g. `IMAGE_TAG=2.11.0`) in `.env`. Operations procedures (upgrade, rollback, backup, secret rotation) are in [`RUNBOOK.md`](RUNBOOK.md).
+`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.11.0` in `.env`.
 
 ## Architecture
 
-```
-                 host :3000 (only published port)
-Browser ──HTTP Basic auth──▶ ┌────────────────────────────┐
-                             │ UI  (Next.js, port 3000)   │
-                             │  • login middleware        │
-                             │  • /healthz                │
-                             │  • /api/* server-side proxy│──┐ adds X-API-Key,
-                             └────────────────────────────┘  │ X-Request-ID,
-                                                             │ X-Forwarded-For
-                        internal compose network only        ▼
-                             ┌────────────────────────────┐      ┌──────────────┐
-                             │ API (FastAPI, port 8000)   │ ───▶ │ Sentry API   │
-                             │  • auth on every route     │ pull │ (HTTPS)      │
-                             │    except /health*         │      └──────────────┘
-                             │  • modeler/ NHPP engine    │
-                             └─────────────┬──────────────┘
-                                           │
-                      volume config_data ──┤── /app/config  (fault_categories.conf, settings.json)
-                      volume output_data ──┘── /app/output  (archives, analyses, plots)
+```mermaid
+flowchart LR
+    B[Browser] -- "HTTP Basic auth" --> UI
+    MCP[MCP server<br/>mcp_server/server.py] -- "Basic auth<br/>/api/*" --> UI
+    subgraph host["Docker Compose"]
+        UI["UI: Next.js :3000<br/>login, /healthz,<br/>/api/* proxy"]
+        API["API: FastAPI :8000<br/>internal only<br/>modeler/ engine"]
+        OUT[(output_data<br/>/app/output)]
+        CFG[(config_data<br/>/app/config)]
+        UI -- "X-API-Key, X-Request-ID" --> API
+        API --- OUT
+        API --- CFG
+    end
+    API -- "HTTPS pull" --> S[Sentry API]
 ```
 
 | Layer | Location | Purpose |
 |-------|----------|---------|
-| UI | `web/ui` | Next.js frontend, login, server-side proxy to the API |
-| API | `web/api` | FastAPI: Sentry ingestion, analysis, GraphQL, health, metrics |
-| Engine | `modeler/` | GO/MO NHPP models, graph analytics, Sentry connector |
+| UI | `web/ui` | Next.js 16 frontend, Basic-auth login, server-side proxy to the API |
+| API | `web/api` | FastAPI: Sentry ingestion, analysis, GraphQL, reports, health, metrics |
+| Engine | `modeler/` | NHPP models, categorisation, graph analytics, Sentry connector, plots |
+| MCP server | `mcp_server/` | Exposes the running stack to AI agents over stdio |
 
-The browser never talks to the API directly and never sees the API key: the UI proxy injects it server-side. Port 8000 is not published to the host.
+The browser never sees the API key; the UI proxy injects it server-side. Port 8000 is not published to the host.
 
-## Authentication
+### UI views
 
-- **API**: every route requires the `X-API-Key: <RELIABILITY_API_KEY>` header **except** `GET /health` and `GET /health/live`. This includes `/docs`, `/redoc`, `/openapi.json` and `/metrics`. The API refuses to start without a key (unless `ALLOW_INSECURE_NO_AUTH=true`, for local development only).
-- **UI**: HTTP Basic auth on every route except `/healthz`, using `UI_USERNAME` / `UI_PASSWORD`. If `UI_PASSWORD` is empty the UI returns `503 UI_PASSWORD not configured` (unless `UI_AUTH_DISABLED=true`, for local development only).
-- The API key is a shared secret on a trusted network, not a per-user identity. Rotate it as described in the runbook.
+| Sidebar tab | Shows |
+|-------------|-------|
+| Sentry | Analysis form: org, project or "Analyze all projects", look-back (1-90 days), forecast horizon (hours) |
+| Dashboard | KPIs, model comparison, reliability forecast, intensity, categories, MTBF trend, heatmap, risk landscape, fault network, project breakdown, recent events, Print Report |
+| Trends | MTBF and failure-rate charts per source, with a source selector and improving/stable/degrading verdict |
+| Logs Archive | Paginated, searchable list of archived runs |
+| Configurations | Fault taxonomy editor, multi-label tagging, optimisation method, tolerance |
+| Methodology | GO and MO formulas, AIC and residuals explained |
+| AI Agents (MCP) | Install, register and credential steps for MCP clients |
+| User Manual, Privacy Policy, About Project | Reference pages |
+
+A system status badge polls `/api/health` and shows Operational, Degraded, Error or API unreachable.
+
+## How it works
+
+| Step | What happens |
+|------|--------------|
+| 1. Ingest | Pulls events newest-first, 100 per page, up to 50 pages (5,000 events) per project. Retries 429/5xx with backoff. |
+| 2. Categorise | Matches event title, exception type, release and environment against `fault_categories.conf` keywords. No match gives `Uncategorized`. |
+| 3. Fit models | GO profiles out `a` and solves `b` with a bounded 1-D search. MO profiles out theta and searches with the configured solver. |
+| 4. Graph analytics | Builds co-occurrence and cascade graphs (2 h window, min co-occurrence 3). Needs at least 5 events. |
+| 5. Archive | Stores the run summary, categorised events and reliability plot under `OUTPUT_DIR`. Returns an ID like `AN-20261016-142233-a1b2c3`. |
+
+**No-fit rules.** A model is not reported when there are fewer than 3 events, the time span is zero, the mean event time is at least half the window (no reliability growth), or the optimum sits on the search boundary. `models` may then be empty.
+
+**Event cap and `truncated`.** With `project: "all"`, up to 50 projects are analysed. If any project hit its 5,000-event cap, every project is trimmed to a common start so the merged timeline is not skewed, and the response carries `truncated: true`. The Dashboard shows a warning.
+
+**Timeouts.** The Sentry fetch and the analysis each have `ANALYSIS_TIMEOUT_SECONDS`. A timed-out analysis stops and is not archived.
 
 ## Configuration
 
-### API
+Every variable is documented in [`.env.example`](.env.example).
 
-| Variable | Required | Default | Purpose |
-|----------|----------|---------|---------|
-| `RELIABILITY_API_KEY` | **yes** | none | Shared secret; also given to the UI service |
-| `SENTRY_AUTH_TOKEN` | for ingestion | empty | Sentry token with `event:read` + `project:read`. Without it `/health` is `degraded` |
-| `SENTRY_BASE_URL` | no | `https://sentry.io/api/0/` | Self-hosted Sentry |
-| `ALLOWED_ORIGINS` | no | `http://localhost:3000` | CORS origins (only for direct browser access to the API) |
-| `LOG_LEVEL` | no | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
-| `RETENTION_DAYS` | no | `90` | Prune archives/analyses/plots older than N days at startup and daily; `0` disables |
-| `ANALYSIS_TIMEOUT_SECONDS` | no | `120` | Max time per analysis |
-| `MAX_BODY_BYTES` | no | `1048576` | Request body limit for POST routes |
-| `RATE_LIMIT_PER_MINUTE` | no | `30` | Per client IP |
-| `CONFIG_DIR` | no | repo root locally, `/app/config` in Docker | Holds `fault_categories.conf` and `settings.json`; seeded from the default on first start |
-| `DEFAULT_CONFIG_PATH` | no | `<repo>/fault_categories.conf`, `/app/defaults/fault_categories.conf` in Docker | Bundled default taxonomy |
-| `OUTPUT_DIR` | no | `<repo>/output`, `/app/output` in Docker | Archives, analyses, plots |
-| `ALLOW_INSECURE_NO_AUTH` | no | `false` | Local development only |
+| Variable | Default | Required | Purpose |
+|----------|---------|----------|---------|
+| `RELIABILITY_API_KEY` | none | **yes** | Shared secret between UI proxy and API (`X-API-Key`) |
+| `UI_PASSWORD` | none | **yes** | UI login password; empty gives 503 on every UI route |
+| `SENTRY_AUTH_TOKEN` | empty | for ingestion | Token with `event:read` + `project:read`; without it `/health` is `degraded` |
+| `SENTRY_BASE_URL` | `https://sentry.io/api/0/` | no | Self-hosted Sentry |
+| `UI_USERNAME` | `admin` | no | UI login username |
+| `UI_PORT` | `3000` | no | Host port for the UI |
+| `PROXY_TIMEOUT_MS` | `250000` | no | UI to API proxy timeout |
+| `TRUST_PROXY` | `false` | no | `true` only behind a reverse proxy that sets `X-Forwarded-For` |
+| `ALLOWED_ORIGINS` | `http://localhost:3000` | no | CORS origins, only for direct browser calls to the API |
+| `LOG_LEVEL` | `INFO` | no | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `RETENTION_DAYS` | `90` | no | Prune archives, analyses and plots at startup and daily; `0` disables |
+| `ANALYSIS_TIMEOUT_SECONDS` | `120` | no | Max seconds for the Sentry fetch and for the analysis |
+| `MAX_BODY_BYTES` | `1048576` | no | API request body limit |
+| `RATE_LIMIT_PER_MINUTE` | `30` | no | API requests per minute per client IP |
+| `API_CPUS` / `UI_CPUS` | `1` / `1` | no | CPU limit per container; keep at or below `nproc` |
+| `API_MEMORY` / `UI_MEMORY` | `1g` / `512m` | no | Memory limit per container |
+| `IMAGE_TAG` | `latest` | no | Image tag to run; pin in production, change to roll back |
+| `DOCKERHUB_NAMESPACE` | `trustaldo` | no | Image namespace to pull from |
+| `ALLOW_INSECURE_NO_AUTH` | `false` | no | Local dev only: API starts without a key. Not passed by compose |
+| `UI_AUTH_DISABLED` | `false` | no | Local dev only: UI skips login. Not passed by compose |
 
-### UI
+Set by the API image, not by `.env`: `CONFIG_DIR=/app/config`, `OUTPUT_DIR=/app/output`, `DEFAULT_CONFIG_PATH=/app/defaults/fault_categories.conf`. Outside Docker they default to the repo root, `./output` and `./fault_categories.conf`. Compose also fixes the UI's `API_URL` to `http://api:8000`.
 
-| Variable | Required | Default | Purpose |
-|----------|----------|---------|---------|
-| `UI_PASSWORD` | **yes** | none | Login password |
-| `UI_USERNAME` | no | `admin` | Login username |
-| `API_URL` | no | `http://api:8000` in compose | Where the proxy forwards `/api/*` (server-side only) |
-| `RELIABILITY_API_KEY` | **yes** | none | Injected by the proxy; must match the API |
-| `PROXY_TIMEOUT_MS` | no | `250000` | Proxy timeout; must cover the Sentry fetch plus `ANALYSIS_TIMEOUT_SECONDS` |
-| `TRUST_PROXY` | no | `false` | `true` only behind a reverse proxy that sets `X-Forwarded-For`; otherwise client-supplied `X-Forwarded-For` is ignored |
-| `UI_AUTH_DISABLED` | no | `false` | Local development only |
-
-### Compose / release
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `IMAGE_TAG` | `latest` | Image tag to run; pin in production, change to roll back |
-| `DOCKERHUB_NAMESPACE` | `trustaldo` | Image namespace |
-| `UI_PORT` | `3000` | Host port for the UI |
-| `API_CPUS` / `UI_CPUS` | `1` / `1` | CPU limit per container; must not exceed the host's CPU count (1 vCPU minimum) |
-| `API_MEMORY` / `UI_MEMORY` | `1g` / `512m` | Memory limit per container |
-
-`make push` does not read `.env`; choose the Docker Hub namespace on the command line: `make push DOCKERHUB_USERNAME=<you>` (default `trustaldo`).
-
-[`.env.example`](.env.example) documents every variable.
+`make push` does not read `.env`; pass the namespace on the command line: `make push DOCKERHUB_USERNAME=<you>`.
 
 ## API reference
 
-All routes except `/health` and `/health/live` need `X-API-Key`. Errors are JSON `{"detail": "..."}`; every response carries `X-Request-ID`.
+The browser and MCP server reach these routes as `/api/<path>` through the UI proxy. Errors are JSON `{"detail": "..."}`. Every response carries `X-Request-ID`.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health/live` | Liveness: always `{"status":"ok"}` |
-| GET | `/health` | Readiness with checks and version; 503 if output/config unusable |
-| GET | `/metrics` | Prometheus metrics |
-| POST | `/ingest/sentry` | Pull events from Sentry and run analysis (`project: "all"` aggregates every project) |
-| GET | `/ingest/sentry/projects` | List projects in an org |
-| GET | `/config` | Fault taxonomy and settings |
-| POST | `/config` | Update fault taxonomy and settings |
-| GET | `/logs` | Paginated analysis archive |
-| POST | `/logs/prune` | Delete archives older than N days |
-| GET | `/trends` | Cross-run MTBF/failure-rate comparison, grouped per source (`groups`) |
-| GET | `/report/{id}/html` | Self-contained HTML executive report |
-| POST | `/graphql` | Failure-graph queries over persisted analyses |
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/health/live` | none | Liveness: `{"status":"ok"}` (not rate limited) |
+| GET | `/health` | none | Readiness: `ok`, `degraded` or `error` (503), with checks and version |
+| GET | `/metrics` | API key | Prometheus metrics (`rm_http_requests_total`, `rm_analyses_total`, ...) |
+| POST | `/ingest/sentry` | API key | Pull events and run the analysis. Body: `org`, `project` (or `all`), `days` (1-90, default 30), `future_hours` (1-100000, default 1000) |
+| GET | `/ingest/sentry/projects?org=` | API key | List projects in a Sentry org |
+| GET | `/config` | API key | Fault taxonomy and engine settings |
+| POST | `/config` | API key | Update taxonomy (`content`) and/or `settings` |
+| GET | `/logs?limit=&offset=` | API key | Paginated archive, newest first (limit 1-200) |
+| POST | `/logs/prune?retention_days=` | API key | Delete archived files older than N days (minimum 7) |
+| GET | `/trends` | API key | Cross-run MTBF and failure-rate trends, grouped per source (`groups`) |
+| GET | `/report/{id}/html` | API key | Self-contained, print-ready HTML report for one run |
+| POST | `/graphql` | API key | Failure-graph queries over archived analyses |
+| GET | `/docs`, `/redoc`, `/openapi.json` | API key | Interactive API docs |
 
-Analysis IDs look like `AN-20261010-142233-a1b2c3` (UTC timestamp + random suffix). IDs from releases before 2.9.0 (`AN-YYYYMMDD-HHMMSS`) remain valid.
+`/ingest/sentry` returns `id`, `summary`, `future_hours`, `models`, `plots` (base64 PNG), `categorized_failures` (newest 100), `categorized_total`, `graph_insights`, `graph_report`, `truncated`, and `projects` for an org-wide run.
 
-### GraphQL examples
+### GraphQL
+
+| Query | Returns |
+|-------|---------|
+| `availableAnalyses` | Analysis IDs available for graph queries |
+| `failureGraph(analysisId, cascadeWindowHours, minCooccurrence)` | `graphMetrics`, `centralityScores`, `cascadeChains`, `communities`, `cooccurrenceEdges`, `graphJson` |
+| `keystoneCategories(analysisId, limit)` | Categories ranked by PageRank, with `isKeystone` and `isBridge` |
+| `cascadeChains(analysisId, limit)` | `chain`, `occurrenceCount`, `avgLatencyHours`, `confidence` |
+| `keystoneCategoriesAcross(limit)` | `keystoneCount` and `avgPagerank` across the 50 most recent analyses |
 
 ```graphql
-{ availableAnalyses }
-
-{ keystoneCategories(analysisId: "AN-20261010-142233-a1b2c3") { node pagerank isBridge } }
-
-{ cascadeChains(analysisId: "AN-20261010-142233-a1b2c3") { chain confidence } }
-
-{ failureGraph(analysisId: "AN-20261010-142233-a1b2c3") {
-    graphMetrics { numCategories numCascadeEdges }
-    centralityScores { node pagerank isKeystone }
-  }
-}
-
-# Which category is consistently keystone across analyses?
-{ keystoneCategoriesAcross(limit: 10) { node keystoneCount avgPagerank totalAnalyses } }
+{ keystoneCategories(analysisId: "AN-20261016-142233-a1b2c3") { node pagerank isBridge } }
 ```
 
-## Local development
+Limits: 256 KB per query, depth 8, at most 10 graph-building fields per request, introspection disabled.
 
-Python 3.13 and Node 22 (the versions the images use).
+## AI agents (MCP)
+
+`mcp_server/server.py` is a stdio MCP server that calls the running stack through the UI proxy.
+
+| Tool | Returns |
+|------|---------|
+| `list_analyses(limit, offset)` | Archived runs, newest first |
+| `get_trends()` | MTBF and failure-rate trends per source |
+| `list_sentry_projects(org)` | Projects in a Sentry org |
+| `run_analysis(org, project, days)` | A fresh analysis (up to about 4 minutes); plots stripped |
+| `graphql(query)` | Read-only failure-graph queries |
+
+Setup, credentials (`RM_URL`, `RM_USERNAME`, `RM_PASSWORD`, `RM_API_KEY`) and client registration: [`mcp_server/README.md`](mcp_server/README.md).
+
+## Development
+
+Python 3.13 and Node 22, matching the images.
 
 ```bash
 # Python
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt   # pulls in web/api/requirements.txt
+pip install -r requirements-dev.txt
 
-# API (runs from web/api; CONFIG_DIR/OUTPUT_DIR default to the repo root / ./output)
+# API
 cd web/api
 RELIABILITY_API_KEY=dev-key uvicorn main:app --reload --port 8000
 
 # UI (second terminal)
-cd web/ui
-npm ci
+cd web/ui && npm ci
 API_URL=http://127.0.0.1:8000 RELIABILITY_API_KEY=dev-key UI_PASSWORD=dev npm run dev
-# open http://localhost:3000 (user admin / password dev)
+# open http://localhost:3000 (admin / dev)
 ```
 
-### Tests and tooling
+| Tests | Command |
+|-------|---------|
+| Python unit (with coverage) | `make test-python` |
+| API integration (API running) | `python -m pytest tests/integration` |
+| UI | `cd web/ui && npm test` (also `npm run lint`, `npm run typecheck`) |
+| MCP server | `cd mcp_server && .venv/bin/python -m pytest -q test_server.py` |
 
-```bash
-make help        # list targets
-make test        # Python unit tests with coverage + UI tests
-make build       # build both images locally (current architecture), tagged :<VERSION>
-make smoke       # start the built images in a throwaway compose project and verify health/auth/proxy
-```
+| Make target | Does |
+|-------------|------|
+| `make help` / `make version` | List targets / print version |
+| `make test` | Python unit tests with coverage, then UI tests |
+| `make build` | Build both images locally, tagged `:<VERSION>` |
+| `make smoke` | Smoke-test the built images in a throwaway compose project |
+| `make push` | Multi-arch build and push `:<VERSION>` and `:latest` (asks to confirm) |
+| `make up` / `make down` / `make logs` | Run, stop (volumes kept) and follow the stack |
+| `make backup` / `make restore FILE=...` | Back up or restore the data volumes |
+| `make clean` | Remove local images and caches |
 
-CI (`.github/workflows/test.yml`) runs unit tests with a 75% coverage floor, API integration tests, UI lint/typecheck/test/build, `npm audit`, `pip-audit`, and a Docker build + smoke test. Releases are built for `linux/amd64` and `linux/arm64` by `make push` or `.github/workflows/release.yml`.
+## Operations
 
-## Documentation
+| Topic | Where |
+|-------|-------|
+| Deploy, upgrade, rollback, secret rotation, incidents | [`RUNBOOK.md`](RUNBOOK.md) |
+| Health, metrics, logging, troubleshooting, capacity | [`SUPPORT.md`](SUPPORT.md) |
+| End-user guide | [`USER_MANUAL.md`](USER_MANUAL.md) |
+| Release notes | [`CHANGELOG.md`](CHANGELOG.md) |
 
-- [`USER_MANUAL.md`](USER_MANUAL.md): end-user guide
-- [`SUPPORT.md`](SUPPORT.md): architecture, monitoring, troubleshooting, capacity
-- [`RUNBOOK.md`](RUNBOOK.md): deploy, upgrade, rollback, rotation, backup/restore, incidents
-- [`mcp_server/README.md`](mcp_server/README.md): MCP server that feeds failure data to AI agents (Claude Code, Codex, Yodaman)
+**Backups.** `scripts/backup.sh` archives `output_data` and `config_data` into a timestamped `.tar.gz` (mode 0600). `scripts/restore.sh` verifies the archive before replacing volumes; stop the stack first.
+
+**CI.** `.github/workflows/test.yml` runs on pushes and PRs to `main`: unit tests (75% coverage floor), MCP tests, API integration tests, UI lint/typecheck/test/build, `npm audit`, `pip-audit`, Docker build and smoke test.
+
+**Releases.** `.github/workflows/release.yml` publishes multi-arch images to Docker Hub. It runs only from `main` or a `v*` tag matching `__version__` in `modeler/__init__.py`, after the full test suite passes.
+
+## Security notes
+
+| Area | Behaviour |
+|------|-----------|
+| UI | HTTP Basic auth on every route except `/healthz`; constant-time credential checks |
+| API | `X-API-Key` on every route except `/health` and `/health/live`, including docs and metrics. Refuses to start without a key |
+| Network | Only the UI port is published; the API is reachable on the compose network only |
+| Secrets | The API key stays server-side in the UI proxy; it never reaches the browser |
+| Rate limiting | Per client IP on the API. Client `X-Forwarded-For` is ignored unless `TRUST_PROXY=true` |
+| Body limits | UI proxy: 1 MiB, and chunked POSTs without `Content-Length` get 411. API: `MAX_BODY_BYTES` |
+| Proxy methods | Only `GET` and `POST` are forwarded |
+| Containers | `no-new-privileges`, all capabilities dropped, non-root API user |
+
+The API key is a shared secret on a trusted network, not a per-user identity. Rotate it as described in the runbook.
 
 ## Ownership
 

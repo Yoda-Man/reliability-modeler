@@ -107,7 +107,7 @@ mcp = MCPServer(
 
 @mcp.tool()
 def list_analyses(limit: int = 20, offset: int = 0) -> dict:
-    """Archived analysis runs, newest first: ID, date, source, failure counts, fitted models (MTBF, predictions)."""
+    """Archived analysis runs, newest first: ID, date, source, total failures and duration. Use graphql for per-run graph detail."""
     return _strip(_call("GET", "/logs", params={"limit": limit, "offset": offset}))
 
 
@@ -120,7 +120,7 @@ def get_trends() -> dict:
 
 @mcp.tool()
 def list_sentry_projects(org: str) -> dict:
-    """Sentry projects available in an organization (slug, name, platform)."""
+    """Sentry projects available in an organization (slug and name)."""
     return _call("GET", "/ingest/sentry/projects", params={"org": org})
 
 
