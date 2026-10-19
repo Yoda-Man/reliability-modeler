@@ -67,7 +67,7 @@ class TestAuth:
 
     @pytest.mark.parametrize("method,path", [
         ("GET", "/config"), ("POST", "/config"), ("GET", "/logs"), ("GET", "/trends"),
-        ("POST", "/logs/prune"), ("POST", "/ingest/sentry"), ("GET", "/ingest/sentry/projects"), ("GET", "/ingest/sentry/organizations"), ("GET", "/config/sentry"), ("POST", "/config/sentry"),
+        ("POST", "/logs/prune"), ("POST", "/ingest/sentry"), ("GET", "/ingest/sentry/projects"), ("GET", "/ingest/sentry/organizations"), ("GET", "/config/sentry"), ("GET", "/analyses/latest/context?category=x"), ("POST", "/config/sentry"),
         ("POST", "/graphql"), ("GET", "/report/AN-20260101-000000/html"),
         ("GET", "/docs"), ("GET", "/redoc"), ("GET", "/openapi.json"), ("GET", "/metrics"),
     ])
@@ -195,7 +195,7 @@ class TestHealth:
     def test_degraded_without_sentry_token(self, client):
         body = client.get("/health").json()
         assert body["status"] == "degraded"
-        assert body["version"] == "2.13.0"
+        assert body["version"] == "2.14.0"
         assert body["checks"] == {"output_writable": True, "config_readable": True,
                                   "sentry_token_configured": False}
         assert body["timestamp"].endswith("+00:00")
@@ -223,7 +223,7 @@ class TestHealth:
 
     def test_version_single_source(self, api_module):
         import modeler
-        assert api_module.app.version == modeler.__version__ == "2.13.0"
+        assert api_module.app.version == modeler.__version__ == "2.14.0"
 
 
 class TestMetrics:
@@ -359,7 +359,7 @@ class TestIngestPipeline:
     def test_single_project_success(self, api_module, client, sentry_token, monkeypatch, isolated_dirs):
         calls = {}
 
-        def fake(org, project, token, config_path, days, multi_label, cancel_event=None):
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
             calls.update(org=org, project=project, token=token, days=days, config_path=config_path)
             return (*_synthetic_sentry(), False)
 
@@ -449,7 +449,7 @@ class TestIngestPipeline:
         assert all(NEW_ID_RE.match(i) for i in ids)
 
     def test_all_projects(self, api_module, client, sentry_token, monkeypatch):
-        def fake_all(org, token, config_path, days, multi_label, cancel_event=None):
+        def fake_all(org, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
             t, cat, t0, cats = _synthetic_sentry(multi=True)
             return t, cat, t0, cats, {"api": 10, "web": 30}, False
 
@@ -459,7 +459,7 @@ class TestIngestPipeline:
         assert body["truncated"] is False
 
     def test_all_projects_truncated_flag(self, api_module, client, sentry_token, monkeypatch):
-        def fake_all(org, token, config_path, days, multi_label, cancel_event=None):
+        def fake_all(org, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
             t, cat, t0, cats = _synthetic_sentry()
             return t, cat, t0, cats, {"api": 40}, True
 
@@ -550,7 +550,7 @@ class TestIngestPipeline:
                                                   "tolerance": 1e-5}})
         seen = {}
 
-        def fake(org, project, token, config_path, days, multi_label, cancel_event=None):
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
             seen["multi_label"] = multi_label
             return (*_synthetic_sentry(), False)
 
@@ -575,6 +575,79 @@ class TestIngestPipeline:
         monkeypatch.setattr(api_module, "fit_model", flaky)
         body = client.post("/ingest/sentry", json={"org": "o", "project": "p"}).json()
         assert body["models"] == []
+
+
+class TestFailureContext:
+    AID = "AN-20261019-120000-abcdef"
+    REF = {"project": "web", "event_id": "a" * 32, "title": "db timeout", "date": "2026-10-19T12:00:00Z"}
+
+    def _store(self, isolated_dirs, aid=None, samples=None):
+        d = isolated_dirs["output"] / "samples"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{aid or self.AID}.json").write_text(json.dumps(
+            {"org": "acme", "samples": samples or {"Database": [self.REF, dict(self.REF, event_id="b" * 32)]}}))
+
+    def test_ingest_saves_samples_for_the_analysis(self, api_module, client, sentry_token, isolated_dirs, monkeypatch):
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
+            event_samples["Database"] = [self.REF]
+            return (*_synthetic_sentry(), False)
+        monkeypatch.setattr(api_module, "load_sentry_failures", fake)
+        aid = client.post("/ingest/sentry", json={"org": "acme", "project": "web"}).json()["id"]
+        saved = json.loads((isolated_dirs["output"] / "samples" / f"{aid}.json").read_text())
+        assert saved == {"org": "acme", "samples": {"Database": [self.REF]}}
+
+    def test_returns_live_context_and_keeps_partial_results(self, api_module, client, sentry_token, isolated_dirs,
+                                                            monkeypatch):
+        self._store(isolated_dirs)
+        calls = []
+
+        def ctx(org, project, event_id, token, base, cancel):
+            calls.append((org, project, event_id, token))
+            if event_id == "b" * 32:
+                raise api_module.SentryError("Sentry event not found (404). Check the slug.")
+            return {"event_id": event_id, "exceptions": [{"type": "TimeoutError", "frames": []}]}
+        monkeypatch.setattr(api_module, "get_event_context", ctx)
+        body = client.get(f"/analyses/{self.AID}/context", params={"category": "Database"}).json()
+        assert calls[0] == ("acme", "web", "a" * 32, "test-token")
+        assert [e["event_id"] for e in body["events"]] == ["a" * 32]
+        assert body["errors"] == [{"event_id": "b" * 32, "detail": "Sentry event not found (404). Check the slug."}]
+
+    def test_latest_and_limit(self, api_module, client, sentry_token, isolated_dirs, monkeypatch):
+        self._store(isolated_dirs)
+        monkeypatch.setattr(api_module, "get_event_context", lambda o, p, e, *a: {"event_id": e})
+        body = client.get("/analyses/latest/context", params={"category": "Database", "limit": 1}).json()
+        assert body["analysis_id"] == self.AID and len(body["events"]) == 1
+
+    def test_all_fetches_failing_is_502(self, api_module, client, sentry_token, isolated_dirs, monkeypatch):
+        self._store(isolated_dirs)
+
+        def fail(*a):
+            raise api_module.SentryError("Sentry denied access (403).")
+        monkeypatch.setattr(api_module, "get_event_context", fail)
+        _assert_detail(client.get(f"/analyses/{self.AID}/context", params={"category": "Database"}), 502)
+
+    def test_unknown_category_lists_available(self, client, isolated_dirs):
+        self._store(isolated_dirs)
+        detail = _assert_detail(client.get(f"/analyses/{self.AID}/context", params={"category": "Nope"}), 404)
+        assert "available: Database" in detail
+
+    def test_missing_samples_and_bad_ids(self, client):
+        assert "run a new analysis" in _assert_detail(
+            client.get(f"/analyses/{self.AID}/context", params={"category": "Database"}), 404)
+        assert "run an analysis first" in _assert_detail(
+            client.get("/analyses/latest/context", params={"category": "Database"}), 404)
+        _assert_detail(client.get("/analyses/AN-x/context", params={"category": "Database"}), 400)
+
+    def test_requires_token(self, client, isolated_dirs):
+        self._store(isolated_dirs)
+        _assert_detail(client.get(f"/analyses/{self.AID}/context", params={"category": "Database"}), 503)
+
+    def test_samples_are_pruned_with_retention(self, api_module, isolated_dirs):
+        self._store(isolated_dirs)
+        f = isolated_dirs["output"] / "samples" / f"{self.AID}.json"
+        old = time.time() - 100 * 86400
+        os.utime(f, (old, old))
+        assert api_module.prune_output(90)["samples"] == [f.name]
 
 
 class TestSentryTokenFromUI:
@@ -781,7 +854,7 @@ class TestLogsAndTrends:
 
         body = client.post("/logs/prune", params={"retention_days": 90}).json()
         assert body["pruned"] == 4
-        assert body["by_directory"] == {"logs": 1, "analyses": 1, "plots": 1, "temp_plots": 1}
+        assert body["by_directory"] == {"logs": 1, "analyses": 1, "plots": 1, "samples": 0, "temp_plots": 1}
         assert (out / "logs" / "AN-20260101-000000.json").exists()
         assert fresh.exists() and not stale.exists()
 
@@ -842,7 +915,7 @@ class TestReport:
         for aid in ("AN-20260101-000000", "AN-20260101-000000-a1b2c3"):
             _write_log(out, aid, 12, 24.0)
             html = client.get(f"/report/{aid}/html").json()["html"]
-            assert aid in html and "UTC" in html and "2.13.0" in html
+            assert aid in html and "UTC" in html and "2.14.0" in html
             assert "data:image/png" not in html
 
     def test_report_kpis_match_trends_and_na(self, client, isolated_dirs):
@@ -946,7 +1019,7 @@ def test_uvicorn_style_import_from_web_api_dir(tmp_path):
         cwd=REPO_ROOT / "web" / "api", env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("2.13.0")
+    assert proc.stdout.strip().endswith("2.14.0")
 
 
 def test_import_refused_without_key(tmp_path):

@@ -70,6 +70,11 @@ def analyses_dir() -> Path:
     return output_dir() / "analyses"
 
 
+def samples_dir() -> Path:
+    """Per-analysis Sentry event references (IDs only) used to fetch stack traces on demand."""
+    return output_dir() / "samples"
+
+
 def plots_dir() -> Path:
     return output_dir() / "plots"
 

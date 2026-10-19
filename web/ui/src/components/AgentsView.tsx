@@ -29,6 +29,8 @@ const TOOLS: [string, string][] = [
     ['get_trends', 'Whether reliability is improving, stable or degrading across runs.'],
     ['list_sentry_organizations', 'Every Sentry organization the token can see, in any region.'],
     ['list_sentry_projects', 'Sentry projects available in an organization.'],
+    ['list_keystone_failures', 'Failure categories ranked by impact (PageRank), keystones and bridges flagged.'],
+    ['get_failure_context', 'Stack traces behind a category: file, function, line and code to fix.'],
     ['run_analysis', 'Pulls 1–90 days of Sentry errors and runs a fresh analysis with a chosen forecast horizon (up to ~4 min).'],
     ['graphql', 'Failure graphs, keystone categories and cascade chains (read-only).'],
 ];
@@ -50,7 +52,7 @@ export default function AgentsView() {
 
             <div className="space-y-10">
                 <Section icon={<Wrench className="text-emerald-500" />} title="What agents can do"
-                    description="Six tools, served over stdio. Agents cannot edit your taxonomy or delete history.">
+                    description="Eight tools, served over stdio. Agents cannot edit your taxonomy or delete history.">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {TOOLS.map(([name, text]) => (
                             <div key={name} className="p-4 rounded-xl bg-slate-900/40 border border-slate-800">

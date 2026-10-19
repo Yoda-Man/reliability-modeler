@@ -17,6 +17,7 @@ Env:
 
 import json
 import os
+import urllib.parse
 from pathlib import Path
 
 import httpx2 as httpx
@@ -99,8 +100,9 @@ mcp = MCPServer(
     instructions=(
         "Reliability analyses of production errors pulled from Sentry. Start with "
         "list_analyses or get_trends for existing data; run_analysis pulls fresh events "
-        "(slow, up to ~4 min). Use graphql for failure graphs, keystone categories and "
-        "cascade chains of a specific analysis ID."
+        "(slow, up to ~4 min). To fix the most impactful failures: list_keystone_failures, "
+        "then get_failure_context(category) for stack traces and code locations. Use graphql "
+        "for full failure graphs and cascade chains of a specific analysis ID."
     ),
 )
 
@@ -145,6 +147,42 @@ def graphql(query: str) -> dict:
     keystoneCategories(analysisId), cascadeChains(analysisId), keystoneCategoriesAcross(limit).
     Example: { availableAnalyses }"""
     return _call("POST", "/graphql", json={"query": query})
+
+
+def _analysis_id(analysis_id: str) -> str:
+    """Resolve 'latest' to the newest archived analysis."""
+    if analysis_id != "latest":
+        return analysis_id
+    logs = _call("GET", "/logs", params={"limit": 1}).get("logs") or []
+    if not logs:
+        raise ToolError("No analyses yet: call run_analysis first.")
+    return logs[0]["id"]
+
+
+@mcp.tool()
+def list_keystone_failures(analysis_id: str = "latest", limit: int = 10) -> dict:
+    """Failure categories of one analysis (default: the newest) ranked by PageRank in the failure
+    network. Keystone (top 20%) categories trigger the most downstream failures, so fixing them
+    helps most; bridges link otherwise separate failure clusters. Follow up with
+    get_failure_context(category) to see the stack traces behind a category."""
+    aid = _analysis_id(analysis_id)
+    query = ("query($id: String!, $n: Int) { keystoneCategories(analysisId: $id, limit: $n) "
+             "{ node pagerank betweenness isKeystone isBridge } }")
+    data = _call("POST", "/graphql", json={"query": query, "variables": {"id": aid, "n": limit}})
+    if data.get("errors"):
+        raise ToolError(f"GraphQL error: {data['errors']}")
+    return {"analysis_id": aid, "categories": (data.get("data") or {}).get("keystoneCategories") or []}
+
+
+@mcp.tool()
+def get_failure_context(category: str, analysis_id: str = "latest", limit: int = 3) -> dict:
+    """Stack traces for up to `limit` (1-5) recent Sentry events in one failure category of an
+    analysis (default: the newest): exception chain with type and message, culprit, release,
+    environment, and the top stack frames (file, function, line, code line), with the app's own
+    code first, plus a link to the event in Sentry. Use the file/function/line to locate and fix
+    the bug. Local variables, request and user data are never included."""
+    aid = urllib.parse.quote(_analysis_id(analysis_id), safe="")
+    return _call("GET", f"/analyses/{aid}/context", params={"category": category, "limit": limit})
 
 
 if __name__ == "__main__":

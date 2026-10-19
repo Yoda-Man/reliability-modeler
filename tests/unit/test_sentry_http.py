@@ -23,6 +23,8 @@ from modeler.sentry import (
     list_sentry_projects,
     load_sentry_failures,
     load_sentry_failures_all,
+    get_event_context,
+    summarize_event,
 )
 
 
@@ -384,3 +386,81 @@ def test_region_lookup_failure_falls_back_to_base(fake, monkeypatch):
     fake.route("/control/api/0/organizations/", (401, {"detail": "no"}, {}))
     fake.route("/api/0/organizations/acme/projects/", (200, [{"slug": "web"}], {}))
     assert [p["slug"] for p in list_sentry_projects("acme", "tok", base_url=fake.base)] == ["web"]
+
+
+# ── Event samples and stack-trace context ───────────────────────────────────
+
+def _eid(n):
+    return f"{n:032x}"
+
+
+def test_samples_keep_newest_events_per_category_capped(fake, taxonomy):
+    events = [dict(_event(i, "DB timeout" if i % 2 else "http 502"), eventID=_eid(i)) for i in range(14)]
+    events.append(dict(_event(20), eventID="not-a-sentry-id"))
+    fake.route(EVENTS, (200, events, fake.link(EVENTS, "x", results=False)))
+    samples = {}
+    load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base, event_samples=samples)
+    assert sorted(samples) == ["Database", "Network"]
+    assert len(samples["Database"]) == sentry.SAMPLES_PER_CATEGORY
+    assert [r["event_id"] for r in samples["Database"]] == [_eid(i) for i in (13, 11, 9, 7, 5)]  # newest first
+    assert samples["Network"][0] == {"project": "web", "event_id": _eid(12), "title": "http 502",
+                                     "date": events[12]["dateCreated"]}
+
+
+FULL_EVENT = {
+    "eventID": _eid(7), "groupID": "4242", "title": "TimeoutError: db timeout", "culprit": "orders.repo in fetch",
+    "platform": "python", "dateCreated": "2026-01-01T00:00:00Z", "release": {"version": "shop@4.2.0"},
+    "tags": [{"key": "environment", "value": "production"}, {"key": "user", "value": "alice@example.com"},
+             {"key": "url", "value": "https://shop/checkout?card=4111"}, {"key": "level", "value": "error"}],
+    "entries": [
+        {"type": "request", "data": {"data": {"password": "hunter2"}}},
+        {"type": "exception", "data": {"values": [
+            {"type": "ConnectionError", "value": "refused", "stacktrace": {"frames": [
+                {"filename": "socket.py", "function": "connect", "lineNo": 9, "inApp": False}]}},
+            {"type": "TimeoutError", "value": "db timeout", "stacktrace": {"frames": [
+                {"filename": "site-packages/sqlalchemy/pool.py", "function": "_do_get", "lineNo": 300, "inApp": False},
+                {"filename": "app/main.py", "function": "handler", "lineNo": 12, "inApp": True,
+                 "context": [[11, "def handler():"], [12, "    return repo.fetch()"]], "vars": {"secret": "x"}},
+                {"filename": "app/orders/repo.py", "function": "fetch", "lineNo": 40, "inApp": True,
+                 "context": [[40, "    rows = db.execute(QUERY)"]], "vars": {"token": "y"}},
+            ]}},
+        ]}},
+    ],
+}
+
+
+def test_summarize_event_keeps_debug_context_and_drops_personal_data():
+    out = summarize_event(FULL_EVENT, "acme", "https://de.sentry.io/api/0")
+    raised = out["exceptions"][-1]
+    assert raised["type"] == "TimeoutError"
+    assert [f["file"] for f in raised["frames"]] == ["app/orders/repo.py", "app/main.py"]  # own code, crash site first
+    assert raised["frames"][0] == {"file": "app/orders/repo.py", "function": "fetch", "line": 40,
+                                   "code": "    rows = db.execute(QUERY)", "in_app": True}
+    assert out["exceptions"][0]["frames"][0]["file"] == "socket.py"  # no own frames: falls back to library frames
+    assert out["release"] == "shop@4.2.0" and out["environment"] == "production"
+    assert out["tags"] == {"environment": "production", "level": "error"}
+    assert out["sentry_url"] == f"https://acme.sentry.io/issues/4242/events/{_eid(7)}/"
+    text = json.dumps(out)
+    for secret in ("hunter2", "alice@example.com", "4111", '"secret"', '"token"', "vars"):
+        assert secret not in text
+
+
+def test_summarize_event_no_sentry_link_for_self_hosted():
+    assert summarize_event(FULL_EVENT, "acme", "https://sentry.internal/api/0")["sentry_url"] is None
+
+
+def test_get_event_context_fetches_one_event(fake):
+    path = f"/api/0/projects/acme/web/events/{_eid(7)}/"
+    fake.route(path, (200, FULL_EVENT, {}))
+    out = get_event_context("acme", "web", _eid(7), "tok", base_url=fake.base)
+    assert out["title"] == "TimeoutError: db timeout"
+    assert fake.requests[-1][0] == path and fake.requests[-1][2] == "Bearer tok"
+
+
+def test_get_event_context_validates_input_and_shape(fake):
+    with pytest.raises(SentryError, match="Invalid event id"):
+        get_event_context("acme", "web", "../../etc", "tok", base_url=fake.base)
+    path = f"/api/0/projects/acme/web/events/{_eid(1)}/"
+    fake.route(path, (200, [1, 2], {}))
+    with pytest.raises(SentryError, match="JSON object"):
+        get_event_context("acme", "web", _eid(1), "tok", base_url=fake.base)

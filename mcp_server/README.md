@@ -11,6 +11,8 @@ It is a thin client of the running stack. Every call goes through the UI proxy (
 | `list_analyses(limit, offset)` | Archived runs, newest first: ID, date, source, total failures, duration |
 | `get_trends()` | MTBF / failure-rate trend per source (`groups`): improving, stable or degrading |
 | `list_sentry_organizations()` | Every Sentry organization the token can see, across US and EU regions |
+| `list_keystone_failures(analysis_id, limit)` | Categories ranked by PageRank with keystone/bridge flags (default: newest analysis) |
+| `get_failure_context(category, analysis_id, limit)` | Stack traces behind a category: exception, culprit, release, top frames (file, function, line, code), Sentry link |
 | `list_sentry_projects(org)` | Sentry projects in an organization |
 | `run_analysis(org, project, days, future_hours)` | Pulls 1–90 days of Sentry events and fits models (up to ~4 min). `truncated: true` means a project hit the per-project event cap |
 | `graphql(query)` | Failure graph, keystone categories and cascade chains per analysis (read-only schema) |

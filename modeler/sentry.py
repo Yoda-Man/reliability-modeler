@@ -52,6 +52,13 @@ BACKOFF_BASE_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 30.0
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _SLUG_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
+_EVENT_ID_RE = re.compile(r'^[0-9a-fA-F]{32}$')
+SAMPLES_PER_CATEGORY = 5      # event references kept per category for on-demand context
+MAX_CONTEXT_FRAMES = 8        # stack frames returned per exception
+MAX_TEXT = 500                # truncation for messages and code lines
+# Only these tags are passed on; others (user, url, server_name, ...) may hold personal or internal data.
+_SAFE_TAGS = {"environment", "release", "level", "handled", "mechanism", "transaction",
+              "runtime", "runtime.name", "os.name", "browser.name", "device.family"}
 
 
 class SentryError(Exception):
@@ -178,9 +185,11 @@ def _sentry_get_page(
     auth_token: str,
     resource: str = "resource",
     cancel_event: Optional[threading.Event] = None,
+    expect_list: bool = True,
 ) -> Tuple[list, Optional[str]]:
     """
-    Perform a GET and return (json_list, next_cursor).
+    Perform a GET and return (json_list, next_cursor); with ``expect_list=False``
+    the body must be a JSON object (e.g. one event) and is returned as is.
 
     Uses the Link header for pagination (Sentry's cursor-based pagination).
     Retries up to MAX_RETRIES times on 429 / 5xx and transient network errors,
@@ -198,8 +207,9 @@ def _sentry_get_page(
                     data = json.loads(resp.read().decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as e:
                     raise SentryError("Sentry returned a malformed (non-JSON) response") from e
-                if not isinstance(data, list):
-                    raise SentryError("Sentry returned an unexpected response shape (expected a list)")
+                if not isinstance(data, list if expect_list else dict):
+                    raise SentryError("Sentry returned an unexpected response shape "
+                                      f"(expected a {'list' if expect_list else 'JSON object'})")
                 return data, _extract_next_cursor(resp.headers.get("Link", ""))
         except urllib.error.HTTPError as e:
             if e.code in _RETRYABLE_STATUS and attempt < MAX_RETRIES:
@@ -337,6 +347,96 @@ def _events_to_raw(events: List[dict], source: str, tag: Optional[str] = None) -
     return raw
 
 
+def _collect_samples(events: List[dict], project: str, fault_categories, multi_label: bool,
+                     samples: Dict[str, List[dict]], tag: Optional[str] = None) -> None:
+    """Record up to SAMPLES_PER_CATEGORY newest event references per category into ``samples``."""
+    for event in sorted(events, key=lambda e: str(e.get("dateCreated") or ""), reverse=True):
+        event_id = str(event.get("eventID") or event.get("id") or "")
+        if not _EVENT_ID_RE.match(event_id):
+            continue
+        desc = _event_description(event)
+        cats = categorize_description(f"[project: {tag}] {desc}" if tag else desc, fault_categories, multi_label)
+        for cat in cats if isinstance(cats, list) else [cats]:
+            bucket = samples.setdefault(cat, [])
+            if len(bucket) < SAMPLES_PER_CATEGORY:
+                bucket.append({"project": project, "event_id": event_id,
+                               "title": str(event.get("title") or "")[:200],
+                               "date": str(event.get("dateCreated") or "")})
+
+
+def _clip(value, limit: int = MAX_TEXT) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def summarize_event(event: dict, org: str, base: str) -> dict:
+    """
+    Reduce a full Sentry event to what an engineer or AI agent needs to locate the bug:
+    exception chain, top stack frames (own code first) with the failing code line,
+    culprit, release and a few safe tags. Local variables, request data, user data
+    and breadcrumbs are deliberately left out.
+    """
+    exceptions = []
+    for entry in event.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("type") != "exception":
+            continue
+        for value in ((entry.get("data") or {}).get("values") or [])[-3:]:
+            frames = [f for f in ((value.get("stacktrace") or {}).get("frames") or []) if isinstance(f, dict)]
+            own = [f for f in frames if f.get("inApp")] or frames
+            top = own[-MAX_CONTEXT_FRAMES:][::-1]  # Sentry lists frames oldest call first; show the crash site first
+            exceptions.append({
+                "type": value.get("type"),
+                "value": _clip(value.get("value")),
+                "frames": [{
+                    "file": f.get("filename") or f.get("absPath") or f.get("module"),
+                    "function": f.get("function"),
+                    "line": f.get("lineNo"),
+                    "code": _clip(next((c[1] for c in f.get("context") or []
+                                        if isinstance(c, list) and len(c) == 2 and c[0] == f.get("lineNo")), None), 300),
+                    "in_app": bool(f.get("inApp")),
+                } for f in top],
+            })
+    tags = {t.get("key"): _clip(t.get("value"), 200) for t in event.get("tags") or []
+            if isinstance(t, dict) and t.get("key") in _SAFE_TAGS}
+    event_id, group_id = str(event.get("eventID") or event.get("id") or ""), str(event.get("groupID") or "")
+    release = event.get("release")
+    return {
+        "event_id": event_id,
+        "date": event.get("dateCreated"),
+        "title": _clip(event.get("title"), 300),
+        "culprit": _clip(event.get("culprit"), 300),
+        "platform": event.get("platform"),
+        "release": (release.get("version") if isinstance(release, dict) else release) or tags.get("release"),
+        "environment": tags.get("environment"),
+        "tags": tags,
+        "exceptions": exceptions,
+        "sentry_url": (f"https://{org}.sentry.io/issues/{group_id}/events/{event_id}/"
+                       if _is_saas(base) and group_id.isdigit() and _EVENT_ID_RE.match(event_id) else None),
+    }
+
+
+def get_event_context(
+    org: str,
+    project: str,
+    event_id: str,
+    auth_token: str,
+    base_url: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> dict:
+    """Fetch one Sentry event and return :func:`summarize_event` of it."""
+    org = _validate_slug(org, "org")
+    project = _validate_slug(project, "project")
+    if not _EVENT_ID_RE.match(event_id or ""):
+        raise SentryError(f"Invalid event id: {event_id!r}")
+    base = _org_base_url(org, auth_token, base_url, cancel_event)
+    url = (f"{base}/projects/{urllib.parse.quote(org, safe='')}/"
+           f"{urllib.parse.quote(project, safe='')}/events/{event_id}/")
+    event, _ = _sentry_get_page(url, auth_token, "event", cancel_event, expect_list=False)
+    return summarize_event(event, org, base)
+
+
 def list_sentry_projects(
     org: str,
     auth_token: str,
@@ -429,6 +529,7 @@ def load_sentry_failures(
     multi_label: bool = False,
     base_url: Optional[str] = None,
     cancel_event: Optional[threading.Event] = None,
+    event_samples: Optional[Dict[str, List[dict]]] = None,
 ) -> Tuple[np.ndarray, List[Tuple], datetime, list, bool]:
     """
     Pull failure events from a single Sentry project and return the normalized
@@ -448,6 +549,8 @@ def load_sentry_failures(
         logger.warning("Sentry: no events found for %s/%s in last %d days", org, project, days)
         return np.array([]), [], datetime.now(timezone.utc), fault_categories, False
 
+    if event_samples is not None:  # filled in place: newest event refs per category, for get_event_context
+        _collect_samples(all_events, project, fault_categories, multi_label, event_samples)
     raw_events = _events_to_raw(all_events, f"{org}/{project}")
     t_hours, cat_list, t0 = _normalize_raw_events(raw_events, fault_categories, multi_label)
     logger.info("Sentry: processed %d failure events from %s/%s", len(cat_list), org, project)
@@ -463,6 +566,7 @@ def load_sentry_failures_all(
     base_url: Optional[str] = None,
     max_projects: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
+    event_samples: Optional[Dict[str, List[dict]]] = None,
 ) -> Tuple[np.ndarray, List[Tuple], datetime, list, Dict[str, int], bool]:
     """
     Pull failure events from ALL projects in an org and aggregate them into a
@@ -511,6 +615,8 @@ def load_sentry_failures_all(
             logger.warning("Sentry: skipping project %s: %s", slug, e)
             continue
 
+        if event_samples is not None:
+            _collect_samples(events, slug, fault_categories, multi_label, event_samples, tag=name)
         raw = _events_to_raw(events, f"{org}/{slug}", tag=name)
         per_project.append((name, raw))
         if project_truncated and raw:

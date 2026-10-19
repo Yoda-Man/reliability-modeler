@@ -92,3 +92,31 @@ def test_list_sentry_organizations_calls_api():
     _use(handler)
     assert server.list_sentry_organizations()["count"] == 1
     assert seen["path"] == "/api/ingest/sentry/organizations"
+
+
+def test_keystone_then_context_resolve_latest_analysis():
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path, dict(req.url.params), req.content))
+        if req.url.path == "/api/logs":
+            return httpx.Response(200, json={"total": 1, "logs": [{"id": "AN-20261019-120000-abcdef"}]})
+        if req.url.path == "/api/graphql":
+            return httpx.Response(200, json={"data": {"keystoneCategories": [
+                {"node": "Database", "pagerank": 0.4, "betweenness": 0.5, "isKeystone": True, "isBridge": True}]}})
+        return httpx.Response(200, json={"category": "Database", "events": [{"event_id": "a" * 32}]})
+
+    _use(handler)
+    ks = server.list_keystone_failures()
+    assert ks["analysis_id"] == "AN-20261019-120000-abcdef" and ks["categories"][0]["node"] == "Database"
+    assert json.loads(seen[1][3])["variables"] == {"id": "AN-20261019-120000-abcdef", "n": 10}
+    ctx = server.get_failure_context("Database", limit=2)
+    assert ctx["events"][0]["event_id"] == "a" * 32
+    assert seen[-1][1] == "/api/analyses/AN-20261019-120000-abcdef/context"
+    assert seen[-1][2] == {"category": "Database", "limit": "2"}
+
+
+def test_latest_with_no_analyses_is_a_clear_error():
+    _use(lambda req: httpx.Response(200, json={"total": 0, "logs": []}))
+    with pytest.raises(ToolError, match="run_analysis first"):
+        server.get_failure_context("Database")

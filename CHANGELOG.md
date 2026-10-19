@@ -5,6 +5,16 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.0] - 2026-10-19
+
+### Added
+- **Stack traces for AI agents.** Each analysis now keeps the IDs of up to 5 recent events per failure category (`output/samples/<id>.json`, pruned with the other output). `GET /analyses/{id}/context?category=` fetches those events live from Sentry and returns what's needed to fix the bug: exception chain (type, message), culprit, release, environment, the top 8 stack frames (file, function, line, code line, app code first) and a link to the event in Sentry. Local variables, request bodies, user data, breadcrumbs and unsafe tags are never included; stack traces are not stored. `id` may be `latest`.
+- MCP tools `list_keystone_failures` (categories ranked by PageRank, keystone/bridge flags, default newest analysis) and `get_failure_context` (the stack traces above). Together: "find the keystone failure and fix it".
+
+### Changed
+- Sentry page: the Claude Code registration command on the AI Agents page uses `$(pwd)` and works as pasted.
+- Clearer Sentry 401/403 messages (name the required scopes and the `sntrys_` limitation).
+
 ## [2.13.0] - 2026-10-19
 
 ### Added

@@ -2,7 +2,7 @@
 
 Turn the errors you already collect in Sentry into reliability forecasts: MTBF, remaining faults and the failure patterns that drive them.
 
-[![Version](https://img.shields.io/badge/version-2.13.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.14.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker Hub](https://img.shields.io/badge/docker-trustaldo%2Freliability--modeler--api-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/trustaldo/reliability-modeler-api)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -37,7 +37,7 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 - Per-project and system-wide breakdowns; MTBF and failure-rate trends per source.
 
 **AI agents via MCP**
-- Stdio MCP server with six tools for Claude Code, Codex, Claude Desktop and other MCP clients.
+- Stdio MCP server with eight tools for Claude Code, Codex, Claude Desktop and other MCP clients.
 - Uses the UI login from the repo `.env`, so no secret goes into agent configs.
 
 **Operations**
@@ -87,7 +87,7 @@ docker compose ps        # both services should become "healthy"
 
 Open **http://localhost:3000** and sign in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`. Go to **Sentry**, enter your org and project, then **Pull & Analyze**.
 
-`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.13.0` in `.env`.
+`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.14.0` in `.env`.
 
 ## Architecture
 
@@ -198,6 +198,7 @@ The browser and MCP server reach these routes as `/api/<path>` through the UI pr
 | POST | `/logs/prune?retention_days=` | API key | Delete archived files older than N days (minimum 7) |
 | GET | `/trends` | API key | Cross-run MTBF and failure-rate trends, grouped per source (`groups`) |
 | GET | `/report/{id}/html` | API key | Self-contained, print-ready HTML report for one run |
+| GET | `/analyses/{id}/context?category=&limit=` | API key | Live stack-trace context for up to 5 recent events in a category (`id` may be `latest`). No local variables, request or user data |
 | POST | `/graphql` | API key | Failure-graph queries over archived analyses |
 | GET | `/docs`, `/redoc`, `/openapi.json` | API key | Interactive API docs |
 
@@ -228,6 +229,8 @@ Limits: 256 KB per query, depth 8, at most 10 graph-building fields per request,
 | `list_analyses(limit, offset)` | Archived runs, newest first |
 | `get_trends()` | MTBF and failure-rate trends per source |
 | `list_sentry_organizations()` | Every Sentry org the token can see, across regions |
+| `list_keystone_failures(analysis_id, limit)` | Categories ranked by PageRank, keystone and bridge flags (default: newest analysis) |
+| `get_failure_context(category, analysis_id, limit)` | Stack traces behind a category: exception, culprit, release, top frames with file/function/line/code, Sentry link |
 | `list_sentry_projects(org)` | Projects in a Sentry org |
 | `run_analysis(org, project, days, future_hours)` | A fresh analysis (up to about 4 minutes); plots stripped |
 | `graphql(query)` | Read-only failure-graph queries |

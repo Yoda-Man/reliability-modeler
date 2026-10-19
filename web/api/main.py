@@ -59,6 +59,7 @@ from modeler.sentry import (
     load_sentry_failures,
     list_sentry_organizations,
     load_sentry_failures_all,
+    get_event_context,
 )
 
 try:
@@ -207,6 +208,7 @@ def prune_output(retention_days: int) -> Dict[str, List[str]]:
         "logs": _prune_directory(rm_config.logs_dir(), cutoff),
         "analyses": _prune_directory(rm_config.analyses_dir(), cutoff),
         "plots": _prune_directory(rm_config.plots_dir(), cutoff),
+        "samples": _prune_directory(rm_config.samples_dir(), cutoff),
         "temp_plots": _prune_directory(rm_config.temp_plots_dir(), now - TEMP_PLOT_MAX_AGE_SECONDS),
     }
     gql.forget_analyses(Path(name).stem for name in result["analyses"])
@@ -706,6 +708,67 @@ def _safe_child(directory: Path, name: str) -> Path:
     return path
 
 
+def _latest_samples_id() -> Optional[str]:
+    files = [f for f in rm_config.samples_dir().glob("*.json") if ANALYSIS_ID_RE.match(f.stem)] \
+        if rm_config.samples_dir().is_dir() else []
+    return max(files, key=lambda f: f.stat().st_mtime).stem if files else None
+
+
+@app.get("/analyses/{analysis_id}/context")
+async def get_failure_context(analysis_id: str, category: str, limit: int = 3):
+    """
+    Stack traces and context for recent Sentry events in one category of an analysis
+    (``latest`` = the newest analysis). Fetched live from Sentry; nothing is stored.
+    Local variables, request and user data are never included.
+    """
+    if analysis_id == "latest":
+        analysis_id = await asyncio.to_thread(_latest_samples_id) or ""
+        if not analysis_id:
+            raise HTTPException(status_code=404, detail="No analysis with event samples yet; run an analysis first")
+    if not ANALYSIS_ID_RE.match(analysis_id):
+        raise HTTPException(status_code=400, detail="Invalid analysis ID")
+    limit = max(1, min(limit, 5))
+    path = _safe_child(rm_config.samples_dir(), f"{analysis_id}.json")
+    try:
+        stored = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No event samples for {analysis_id}; analyses before "
+                                                    f"2.14 don't have them, so run a new analysis")
+    except (OSError, ValueError):
+        logger.warning("Unreadable samples file for %s", analysis_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Event samples for this analysis are unreadable")
+    samples = stored.get("samples") or {}
+    if category not in samples:
+        raise HTTPException(status_code=404, detail=f"Category {category!r} not in this analysis; "
+                                                    f"available: {', '.join(sorted(samples))}")
+    auth_token = _sentry_token()
+    org = str(stored.get("org", ""))
+    cancel = threading.Event()
+
+    def fetch_all():
+        events, errors = [], []
+        for ref in samples[category][:limit]:
+            try:
+                events.append(get_event_context(org, str(ref.get("project", "")), str(ref.get("event_id", "")),
+                                                auth_token, None, cancel))
+            except SentryCancelled:
+                raise
+            except SentryError as e:  # e.g. event deleted by Sentry retention; keep the others
+                errors.append({"event_id": ref.get("event_id"), "detail": str(e)})
+        return events, errors
+
+    try:
+        events, errors = await asyncio.wait_for(asyncio.to_thread(fetch_all), timeout=ANALYSIS_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        cancel.set()
+        raise HTTPException(status_code=504, detail="Sentry event fetch timed out")
+    except SentryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not events and errors:
+        raise HTTPException(status_code=502, detail=f"Could not fetch any sample event: {errors[0]['detail']}")
+    return {"analysis_id": analysis_id, "org": org, "category": category, "events": events, "errors": errors}
+
+
 @app.get("/report/{analysis_id}/html")
 async def get_html_report(analysis_id: str):
     """
@@ -1123,18 +1186,19 @@ async def ingest_sentry(payload: SentryIngestRequest):
     cancel = threading.Event()
     project_counts: Dict[str, int] = {}
     truncated = False
+    samples: Dict[str, List[dict]] = {}
     try:
         if project == "all":
             t, categorized, t0, _, project_counts, truncated = await asyncio.wait_for(
                 asyncio.to_thread(load_sentry_failures_all, org, auth_token, config_path, days,
-                                  settings.multi_label, cancel_event=cancel),
+                                  settings.multi_label, cancel_event=cancel, event_samples=samples),
                 timeout=ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/ALL_PROJECTS ({days}d)"
         else:
             t, categorized, t0, _, truncated = await asyncio.wait_for(
                 asyncio.to_thread(load_sentry_failures, org, project, auth_token, config_path, days,
-                                  settings.multi_label, cancel_event=cancel),
+                                  settings.multi_label, cancel_event=cancel, event_samples=samples),
                 timeout=ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/{project} ({days}d)"
@@ -1159,6 +1223,12 @@ async def ingest_sentry(payload: SentryIngestRequest):
 
     result = await _analyze(t, categorized, t0, display_name, payload.future_hours)
     result["truncated"] = bool(truncated)
+    if samples:
+        try:
+            await asyncio.to_thread(rm_config.atomic_write_json, rm_config.samples_dir() / f"{result['id']}.json",
+                                    {"org": org, "samples": samples})
+        except OSError:
+            logger.warning("Could not save event samples for %s", result["id"], exc_info=True)
     if project_counts:
         result["projects"] = dict(sorted(project_counts.items(), key=lambda kv: kv[1], reverse=True))
     return result

@@ -43,7 +43,7 @@ export default function PrivacyPolicy() {
                                 Failure Events
                             </h4>
                             <p className="text-xs text-slate-400 leading-relaxed">
-                                Failure events are pulled from Sentry on demand and stored in <code className="text-slate-500">/app/output/analyses</code> to power historical graph queries. They are automatically pruned after 90 days.
+                                Failure events are pulled from Sentry on demand and stored in <code className="text-slate-500">/app/output/analyses</code> to power historical graph queries. They are automatically pruned after 90 days. For each analysis the IDs of a few sample events per category are kept (in <code className="text-slate-500">/app/output/samples</code>, pruned with the rest) so AI agents can request stack traces. Stack traces are fetched from Sentry on demand and never stored; local variables, request data and user details are never included.
                             </p>
                         </div>
                         <div className="p-6 rounded-2xl bg-slate-900/30 border border-slate-800">
