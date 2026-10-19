@@ -16,6 +16,7 @@ import {
 // ── Types ───────────────────────────────────────────────────────────────────
 
 import type { AnalysisResults, CategorizedFailure, GraphReport } from '@/lib/types';
+import FailureNetworkGraph from '@/components/FailureNetworkGraph';
 
 // ── Color Palette ───────────────────────────────────────────────────────────
 
@@ -488,6 +489,10 @@ export default function Dashboard({ data }: { data: AnalysisResults }) {
                     <GraphInsightCard graphReport={data.graph_report} />
                 </div>
             </div>
+
+            {data.graph_report?.graph_json && data.graph_report.graph_json.nodes.length > 0 && (
+                <FailureNetworkGraph graphReport={data.graph_report} palette={CATEGORY_COLORS} />
+            )}
 
             {/* ── Category Charts Row ─────────────────────────────────────── */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -195,7 +195,7 @@ class TestHealth:
     def test_degraded_without_sentry_token(self, client):
         body = client.get("/health").json()
         assert body["status"] == "degraded"
-        assert body["version"] == "2.11.1"
+        assert body["version"] == "2.12.0"
         assert body["checks"] == {"output_writable": True, "config_readable": True,
                                   "sentry_token_configured": False}
         assert body["timestamp"].endswith("+00:00")
@@ -223,7 +223,7 @@ class TestHealth:
 
     def test_version_single_source(self, api_module):
         import modeler
-        assert api_module.app.version == modeler.__version__ == "2.11.1"
+        assert api_module.app.version == modeler.__version__ == "2.12.0"
 
 
 class TestMetrics:
@@ -761,7 +761,7 @@ class TestReport:
         for aid in ("AN-20260101-000000", "AN-20260101-000000-a1b2c3"):
             _write_log(out, aid, 12, 24.0)
             html = client.get(f"/report/{aid}/html").json()["html"]
-            assert aid in html and "UTC" in html and "2.11.1" in html
+            assert aid in html and "UTC" in html and "2.12.0" in html
             assert "data:image/png" not in html
 
     def test_report_kpis_match_trends_and_na(self, client, isolated_dirs):
@@ -865,7 +865,7 @@ def test_uvicorn_style_import_from_web_api_dir(tmp_path):
         cwd=REPO_ROOT / "web" / "api", env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("2.11.1")
+    assert proc.stdout.strip().endswith("2.12.0")
 
 
 def test_import_refused_without_key(tmp_path):

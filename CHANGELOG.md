@@ -5,6 +5,16 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.0] - 2026-10-19
+
+### Added
+- **Failure Network view** on the Dashboard: an interactive graph of every fault category, drawn from the existing `graph_json` (no API change, no new dependency).
+  - Nodes sized by PageRank and coloured by community; keystone (solid ring) and bridge (dashed ring) markers.
+  - Co-occurrence links weighted by frequency; the 25 strongest cascades as arrows weighted by confidence, curved so opposite directions don't overlap.
+  - Hover or keyboard focus highlights a category's links; click pins a panel with PageRank, weighted degree, and what it triggers / is triggered by (confidence, average latency).
+  - Toggles for each edge type, a legend, and screen-reader labels.
+- README screenshot of the new view (`docs/screenshots/network.png`).
+
 ## [2.11.1] - 2026-10-16
 
 ### Fixed

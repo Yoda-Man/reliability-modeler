@@ -1,6 +1,6 @@
 # Reliability Modeler: User Manual
 
-Version 2.11.1
+Version 2.12.0
 
 ## 1. Introduction
 
@@ -54,6 +54,7 @@ The primary view for analysis results.
 - **Risk Landscape**: categories plotted by failure count x graph centrality.
 - **Failure Heatmap**: failure density by day of week and hour of day.
 - **Fault Network Intelligence**: keystone categories and failure cascades.
+- **Failure Network**: an interactive graph of all categories. Bigger circles carry more failure traffic (PageRank); colours group categories that fail together; a solid ring marks a keystone and a dashed ring a bridge. Grey lines show how often two categories occur together; amber arrows show cascades (one failure type followed by another). Hover or tab to a category to highlight its links, click it to list what it triggers and what triggers it, and use the checkboxes to hide either edge type.
 - **Project Breakdown**: which Sentry project contributes the most failures (when analysing "all projects").
 
 ### 5.3 Trends

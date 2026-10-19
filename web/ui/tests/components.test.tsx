@@ -7,7 +7,8 @@ import AgentsView from '@/components/AgentsView';
 import Dashboard from '@/components/Dashboard';
 import SentryView from '@/components/SentryView';
 import TrendsView from '@/components/TrendsView';
-import type { AnalysisResults, CategorizedFailure, TrendRun } from '@/lib/types';
+import FailureNetworkGraph, { layoutNetwork } from '@/components/FailureNetworkGraph';
+import type { AnalysisResults, CategorizedFailure, GraphReport, TrendRun } from '@/lib/types';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -183,5 +184,50 @@ describe('TrendsView', () => {
     render(<TrendsView />);
     expect(await screen.findByText(/MTBF Improving/)).toBeTruthy();
     expect(screen.queryByLabelText('Source')).toBeNull();
+  });
+});
+
+const network: GraphReport = {
+  keystone_categories: [{ name: 'Database', pagerank: 0.5, is_bridge: true }],
+  top_cascade: { chain: 'Database → Network', confidence: 0.6 },
+  num_communities: 2,
+  graph_density: 0.5,
+  graph_json: {
+    nodes: [
+      { id: 'Database', pagerank: 0.5, degree: 9, community: 0 },
+      { id: 'Network', pagerank: 0.3, degree: 6, community: 0 },
+      { id: 'Memory', pagerank: 0.2, degree: 3, community: 1 },
+    ],
+    edges: [{ source: 'Database', target: 'Network', weight: 5, jaccard: 0.4 }],
+    cascade_edges: [
+      { source: 'Database', target: 'Network', weight: 4, confidence: 0.6, avg_latency: 0.5 },
+      { source: 'Memory', target: 'Database', weight: 1, confidence: 0.2, avg_latency: 1.5 },
+    ],
+  },
+};
+
+describe('FailureNetworkGraph', () => {
+  it('lays nodes out inside the canvas, grouped by community, biggest PageRank largest', () => {
+    const pos = layoutNetwork(network.graph_json!, 560);
+    expect(pos.map(p => p.id)).toEqual(['Database', 'Network', 'Memory']);
+    for (const p of pos) {
+      expect(p.x - p.r).toBeGreaterThanOrEqual(0);
+      expect(p.x + p.r).toBeLessThanOrEqual(560);
+      expect(p.y - p.r).toBeGreaterThanOrEqual(0);
+      expect(p.y + p.r).toBeLessThanOrEqual(560);
+    }
+    expect(pos[0].r).toBeGreaterThan(pos[2].r);
+  });
+
+  it('shows the cascades of a clicked category, and the Dashboard renders the card', () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    render(<FailureNetworkGraph graphReport={network} palette={['#3b82f6', '#10b981']} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Database, PageRank 0\.500, keystone, bridge$/ }));
+    expect(screen.getByText('Triggers')).toBeTruthy();
+    expect(screen.getByText('Triggered by')).toBeTruthy();
+    expect(screen.getByText('60% · 0.5h')).toBeTruthy();
+    cleanup();
+    render(<Dashboard data={results({ graph_report: network })} />);
+    expect(screen.getByRole('img', { name: 'Failure network of 3 categories' })).toBeTruthy();
   });
 });

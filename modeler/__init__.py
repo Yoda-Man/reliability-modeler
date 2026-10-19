@@ -4,4 +4,4 @@
 the API, Makefile and release tooling all read it from here.
 """
 
-__version__ = "2.11.1"
+__version__ = "2.12.0"

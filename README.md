@@ -2,7 +2,7 @@
 
 Turn the errors you already collect in Sentry into reliability forecasts: MTBF, remaining faults and the failure patterns that drive them.
 
-[![Version](https://img.shields.io/badge/version-2.11.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.12.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker Hub](https://img.shields.io/badge/docker-trustaldo%2Freliability--modeler--api-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/trustaldo/reliability-modeler-api)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -29,6 +29,7 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 - Recurring cascade chains with occurrence count, latency and confidence.
 - Louvain communities, graph density and plain-language insights.
 - Cross-analysis view of categories that are keystone most often.
+- Interactive failure-network view on the Dashboard: categories sized by PageRank, coloured by community, with co-occurrence links and cascade arrows; click a category to see what it triggers and what triggers it.
 
 **Sentry ingestion**
 - Pull 1 to 90 days of events from one project, or aggregate every project in an org.
@@ -57,8 +58,8 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
     <td width="50%"><img src="docs/screenshots/config.png" width="100%" alt="Taxonomy and settings"><br><sub><b>Taxonomy and settings</b>: fault categories, multi-label tagging, solver settings.</sub></td>
   </tr>
   <tr>
+    <td width="50%"><img src="docs/screenshots/network.png" width="100%" alt="Failure network graph"><br><sub><b>Failure network</b>: keystones, bridges, co-occurrence and cascades; click a category for its triggers.</sub></td>
     <td width="50%"><img src="docs/screenshots/agents.png" width="100%" alt="Connect AI agents"><br><sub><b>Connect AI agents</b>: copyable MCP setup for each client.</sub></td>
-    <td width="50%"></td>
   </tr>
 </table>
 
@@ -86,7 +87,7 @@ docker compose ps        # both services should become "healthy"
 
 Open **http://localhost:3000** and sign in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`. Go to **Sentry**, enter your org and project, then **Pull & Analyze**.
 
-`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.11.1` in `.env`.
+`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.12.0` in `.env`.
 
 ## Architecture
 
