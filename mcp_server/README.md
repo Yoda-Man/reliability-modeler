@@ -10,6 +10,7 @@ It is a thin client of the running stack. Every call goes through the UI proxy (
 |------|-----------------|
 | `list_analyses(limit, offset)` | Archived runs, newest first: ID, date, source, total failures, duration |
 | `get_trends()` | MTBF / failure-rate trend per source (`groups`): improving, stable or degrading |
+| `list_sentry_organizations()` | Every Sentry organization the token can see, across US and EU regions |
 | `list_sentry_projects(org)` | Sentry projects in an organization |
 | `run_analysis(org, project, days, future_hours)` | Pulls 1–90 days of Sentry events and fits models (up to ~4 min). `truncated: true` means a project hit the per-project event cap |
 | `graphql(query)` | Failure graph, keystone categories and cascade chains per analysis (read-only schema) |
@@ -35,12 +36,12 @@ By default the server calls `http://localhost:${UI_PORT:-3000}/api` (the local U
 
 ## Register with a client
 
-Use absolute paths. `<repo>` is this checkout.
+Run these from the repo root. The Claude Code command works as pasted; in the config files, replace `<repo>` with the output of `pwd` (an absolute path, without the angle brackets).
 
 **Claude Code**
 
 ```bash
-claude mcp add reliability-modeler --scope user -- <repo>/mcp_server/.venv/bin/python <repo>/mcp_server/server.py
+claude mcp add reliability-modeler --scope user -- "$(pwd)/mcp_server/.venv/bin/python" "$(pwd)/mcp_server/server.py"
 ```
 
 **Codex**: add to `~/.codex/config.toml`:

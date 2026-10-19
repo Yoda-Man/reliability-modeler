@@ -123,3 +123,24 @@ export interface HealthResponse {
         sentry_token_configured: boolean;
     };
 }
+
+/** GET/POST /config/sentry. The token itself is never returned. */
+export interface SentryStatus {
+    configured: boolean;
+    source: 'environment' | 'ui' | 'none';
+    token_type: 'personal' | 'integration' | 'organization' | 'none';
+    organizations?: number;
+}
+
+/** GET /ingest/sentry/organizations */
+export interface SentryOrganization {
+    slug: string;
+    name: string;
+    region: string;
+}
+
+/** GET /ingest/sentry/projects?org= */
+export interface SentryProject {
+    slug: string;
+    name: string;
+}

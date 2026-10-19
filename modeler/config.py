@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 TAXONOMY_FILENAME = "fault_categories.conf"
 SETTINGS_FILENAME = "settings.json"
+SENTRY_TOKEN_FILENAME = "sentry_token"  # saved from the UI; written mode 0600 by atomic_write_bytes
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -55,6 +56,10 @@ def taxonomy_path() -> Path:
 
 def settings_path() -> Path:
     return config_dir() / SETTINGS_FILENAME
+
+
+def sentry_token_path() -> Path:
+    return config_dir() / SENTRY_TOKEN_FILENAME
 
 
 def logs_dir() -> Path:

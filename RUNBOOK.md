@@ -18,7 +18,7 @@ All commands run from the repository (or deployment) directory containing `docke
 cp .env.example .env && chmod 600 .env
 openssl rand -hex 32          # paste as RELIABILITY_API_KEY
 openssl rand -base64 24       # paste as UI_PASSWORD (or choose one)
-# set SENTRY_AUTH_TOKEN (event:read + project:read) and pin IMAGE_TAG=2.12.0
+# optionally set SENTRY_AUTH_TOKEN (or connect a token later on the Sentry page) and pin IMAGE_TAG=2.13.0
 docker compose pull
 docker compose up -d
 docker compose ps             # wait for api and ui to be "healthy" (about 30 s)
@@ -29,10 +29,10 @@ Verify:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/healthz            # 200
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/                   # 401 (login required)
-curl -s -u admin:"<UI_PASSWORD>" http://localhost:3000/api/health                 # {"status":"ok",...,"version":"2.12.0"}
+curl -s -u admin:"<UI_PASSWORD>" http://localhost:3000/api/health                 # {"status":"ok",...,"version":"2.13.0"}
 ```
 
-`degraded` means `SENTRY_AUTH_TOKEN` is missing. Then open http://localhost:3000, log in, and run a Sentry analysis.
+`degraded` means no Sentry token is connected yet: paste one on the Sentry page, or set `SENTRY_AUTH_TOKEN`. Then open http://localhost:3000, log in, and run a Sentry analysis.
 
 ## 2. Upgrade
 
@@ -92,7 +92,8 @@ IMAGE_TAG=2.8.1 docker compose -f docker-compose.2.8.yml up -d
 |--------|-------|--------|
 | `RELIABILITY_API_KEY` | 1. `openssl rand -hex 32` 2. update `.env` 3. `docker compose up -d --force-recreate api ui` (both services must get the new value together) 4. update any external caller (e.g. metrics scraper) | Requests in flight during the ~30 s recreate fail; UI shows API errors until both are up |
 | `UI_PASSWORD` / `UI_USERNAME` | 1. update `.env` 2. `docker compose up -d --force-recreate ui` 3. tell users | Users are prompted to log in again |
-| `SENTRY_AUTH_TOKEN` | 1. create the new token in Sentry (`event:read`, `project:read`) 2. update `.env` 3. `docker compose up -d --force-recreate api` 4. check `/api/health` shows `sentry_token_configured: true` 5. revoke the old token in Sentry | Ingest unavailable during recreate |
+| Sentry token (connected in the UI) | Sentry page → paste the new token → **Replace** (it is checked before saving). Then revoke the old token in Sentry |
+| `SENTRY_AUTH_TOKEN` | 1. create the new token in Sentry (`event:read`, `project:read`, `org:read`) 2. update `.env` 3. `docker compose up -d --force-recreate api` 4. check `/api/health` shows `sentry_token_configured: true` 5. revoke the old token in Sentry | Ingest unavailable during recreate |
 | Docker Hub token (CI) | Create a new access token, update the `DOCKERHUB_TOKEN` repository secret, revoke the old one | None |
 
 After a suspected leak: rotate all three, review `docker compose logs api` for unexpected `401`/`429` patterns and unknown source IPs.
@@ -129,7 +130,8 @@ If you run the stack under a non-default compose project name, set `COMPOSE_PROJ
 | UI loads but every API call fails with 401 "Invalid or missing API key" | UI and API have different `RELIABILITY_API_KEY` (one service not recreated after rotation) | `docker compose up -d --force-recreate api ui` |
 | Every UI request returns 503 "UI_PASSWORD not configured" | `UI_PASSWORD` empty in the UI container | Set it in `.env`, recreate `ui` |
 | API container exits immediately, log says API key required | `RELIABILITY_API_KEY` empty | Set it; never use `ALLOW_INSECURE_NO_AUTH` outside local dev |
-| `/health` 200 `degraded`, `sentry_token_configured: false` | `SENTRY_AUTH_TOKEN` not set on api | Set it, recreate `api` |
+| `/health` 200 `degraded`, `sentry_token_configured: false` | No Sentry token | Connect one on the Sentry page, or set `SENTRY_AUTH_TOKEN` and recreate `api` |
+| Sentry 403 "denied access" | Organization token (`sntrys_`) or missing scopes | Use a personal or integration token with `event:read`, `project:read`, `org:read` |
 | `/health` 503 `error`, `config_readable: false` | `config_data` volume missing/corrupt or wrong ownership | `docker compose exec api ls -l /app/config`; files must be readable by uid 10001. Restore config from backup, or remove the bad file to re-seed defaults |
 | `/health` 503 `error`, `output_writable: false` | Output volume full or not owned by uid 10001 | Check disk space (`docker system df -v`); fix ownership: `docker run --rm -v <project>_output_data:/d busybox:1.37 chown -R 10001:10001 /d` |
 | 413 "Request body too large" | Body above `MAX_BODY_BYTES` (API) or 1 MiB (proxy), usually a huge taxonomy | Shrink the payload; raise `MAX_BODY_BYTES` only if justified (the proxy limit is fixed at 1 MiB) |

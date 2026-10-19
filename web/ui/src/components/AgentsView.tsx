@@ -7,8 +7,9 @@ import { Bot, Check, Copy, KeyRound, PlugZap, Terminal, Wrench } from 'lucide-re
 const SETUP = `python3 -m venv mcp_server/.venv
 mcp_server/.venv/bin/pip install -r mcp_server/requirements.txt`;
 
+// Run from the repo root: $(pwd) fills in the absolute path, so the command works as pasted.
 const CLAUDE = `claude mcp add reliability-modeler --scope user -- \\
-  <repo>/mcp_server/.venv/bin/python <repo>/mcp_server/server.py`;
+  "$(pwd)/mcp_server/.venv/bin/python" "$(pwd)/mcp_server/server.py"`;
 
 const CODEX = `[mcp_servers.reliability-modeler]
 command = "<repo>/mcp_server/.venv/bin/python"
@@ -26,6 +27,7 @@ const JSON_CONFIG = `{
 const TOOLS: [string, string][] = [
     ['list_analyses', 'Past analysis runs, newest first: ID, date, source, total failures and duration.'],
     ['get_trends', 'Whether reliability is improving, stable or degrading across runs.'],
+    ['list_sentry_organizations', 'Every Sentry organization the token can see, in any region.'],
     ['list_sentry_projects', 'Sentry projects available in an organization.'],
     ['run_analysis', 'Pulls 1–90 days of Sentry errors and runs a fresh analysis with a chosen forecast horizon (up to ~4 min).'],
     ['graphql', 'Failure graphs, keystone categories and cascade chains (read-only).'],
@@ -48,7 +50,7 @@ export default function AgentsView() {
 
             <div className="space-y-10">
                 <Section icon={<Wrench className="text-emerald-500" />} title="What agents can do"
-                    description="Five tools, served over stdio. Agents cannot edit your taxonomy or delete history.">
+                    description="Six tools, served over stdio. Agents cannot edit your taxonomy or delete history.">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {TOOLS.map(([name, text]) => (
                             <div key={name} className="p-4 rounded-xl bg-slate-900/40 border border-slate-800">
@@ -65,7 +67,7 @@ export default function AgentsView() {
                 </Section>
 
                 <Section icon={<PlugZap className="text-amber-500" />} title="2. Register with your agent"
-                    description="Replace <repo> with the absolute path of your checkout.">
+                    description="Run the Claude Code command from the repo root as is. For the config files, replace <repo> with the output of pwd in the repo root (no angle brackets).">
                     <div className="space-y-6">
                         <div>
                             <h4 className="text-sm font-semibold text-white mb-2">Claude Code</h4>

@@ -2,7 +2,7 @@
 
 Turn the errors you already collect in Sentry into reliability forecasts: MTBF, remaining faults and the failure patterns that drive them.
 
-[![Version](https://img.shields.io/badge/version-2.12.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.13.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker Hub](https://img.shields.io/badge/docker-trustaldo%2Freliability--modeler--api-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/trustaldo/reliability-modeler-api)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -37,7 +37,7 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 - Per-project and system-wide breakdowns; MTBF and failure-rate trends per source.
 
 **AI agents via MCP**
-- Stdio MCP server with five tools for Claude Code, Codex, Claude Desktop and other MCP clients.
+- Stdio MCP server with six tools for Claude Code, Codex, Claude Desktop and other MCP clients.
 - Uses the UI login from the repo `.env`, so no secret goes into agent configs.
 
 **Operations**
@@ -50,7 +50,7 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/sentry.png" width="100%" alt="Sentry analysis form"><br><sub><b>Run an analysis</b>: org, project or all projects, look-back window, forecast horizon.</sub></td>
+    <td width="50%"><img src="docs/screenshots/sentry.png" width="100%" alt="Sentry analysis form"><br><sub><b>Run an analysis</b>: connect Sentry once, pick any organization and project (or all projects), look-back window, forecast horizon.</sub></td>
     <td width="50%"><img src="docs/screenshots/trends.png" width="100%" alt="Reliability trends"><br><sub><b>Reliability trends</b>: MTBF and failure rate per source across runs.</sub></td>
   </tr>
   <tr>
@@ -78,7 +78,7 @@ Set these keys in `.env`:
 |-----|---------------|
 | `RELIABILITY_API_KEY` | `openssl rand -hex 32` (required) |
 | `UI_PASSWORD` | `openssl rand -base64 24` (required) |
-| `SENTRY_AUTH_TOKEN` | Sentry token with `event:read` and `project:read` (needed to ingest) |
+| `SENTRY_AUTH_TOKEN` | Optional. You can instead connect a token on the Sentry page of the UI |
 
 ```bash
 docker compose up -d
@@ -87,7 +87,7 @@ docker compose ps        # both services should become "healthy"
 
 Open **http://localhost:3000** and sign in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`. Go to **Sentry**, enter your org and project, then **Pull & Analyze**.
 
-`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.12.0` in `.env`.
+`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.13.0` in `.env`.
 
 ## Architecture
 
@@ -155,8 +155,8 @@ Every variable is documented in [`.env.example`](.env.example).
 |----------|---------|----------|---------|
 | `RELIABILITY_API_KEY` | none | **yes** | Shared secret between UI proxy and API (`X-API-Key`) |
 | `UI_PASSWORD` | none | **yes** | UI login password; empty gives 503 on every UI route |
-| `SENTRY_AUTH_TOKEN` | empty | for ingestion | Token with `event:read` + `project:read`; without it `/health` is `degraded` |
-| `SENTRY_BASE_URL` | `https://sentry.io/api/0/` | no | Self-hosted Sentry |
+| `SENTRY_AUTH_TOKEN` | empty | no | Personal (`sntryu_`) or integration token with `event:read`, `project:read`, `org:read`. Overrides a token connected in the UI. With neither, `/health` is `degraded` |
+| `SENTRY_BASE_URL` | `https://sentry.io/api/0/` | no | Self-hosted Sentry only. sentry.io organizations in any region (US, EU) are found automatically |
 | `UI_USERNAME` | `admin` | no | UI login username |
 | `UI_PORT` | `3000` | no | Host port for the UI |
 | `PROXY_TIMEOUT_MS` | `250000` | no | UI to API proxy timeout |
@@ -188,9 +188,12 @@ The browser and MCP server reach these routes as `/api/<path>` through the UI pr
 | GET | `/health` | none | Readiness: `ok`, `degraded` or `error` (503), with checks and version |
 | GET | `/metrics` | API key | Prometheus metrics (`rm_http_requests_total`, `rm_analyses_total`, ...) |
 | POST | `/ingest/sentry` | API key | Pull events and run the analysis. Body: `org`, `project` (or `all`), `days` (1-90, default 30), `future_hours` (1-100000, default 1000) |
+| GET | `/ingest/sentry/organizations` | API key | Every Sentry org the token can see (slug, name, region) |
 | GET | `/ingest/sentry/projects?org=` | API key | List projects in a Sentry org |
 | GET | `/config` | API key | Fault taxonomy and engine settings |
 | POST | `/config` | API key | Update taxonomy (`content`) and/or `settings` |
+| GET | `/config/sentry` | API key | Whether a Sentry token is connected, its source (`environment`, `ui`, `none`) and type. Never returns the token |
+| POST | `/config/sentry` | API key | `{"token": "..."}` checks the token with Sentry and saves it (mode 0600 in `config_data`); `{"token": ""}` removes it. 409 when `SENTRY_AUTH_TOKEN` is set |
 | GET | `/logs?limit=&offset=` | API key | Paginated archive, newest first (limit 1-200) |
 | POST | `/logs/prune?retention_days=` | API key | Delete archived files older than N days (minimum 7) |
 | GET | `/trends` | API key | Cross-run MTBF and failure-rate trends, grouped per source (`groups`) |
@@ -224,6 +227,7 @@ Limits: 256 KB per query, depth 8, at most 10 graph-building fields per request,
 |------|---------|
 | `list_analyses(limit, offset)` | Archived runs, newest first |
 | `get_trends()` | MTBF and failure-rate trends per source |
+| `list_sentry_organizations()` | Every Sentry org the token can see, across regions |
 | `list_sentry_projects(org)` | Projects in a Sentry org |
 | `run_analysis(org, project, days, future_hours)` | A fresh analysis (up to about 4 minutes); plots stripped |
 | `graphql(query)` | Read-only failure-graph queries |

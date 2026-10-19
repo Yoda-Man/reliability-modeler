@@ -2,7 +2,7 @@
 
 Reference for operators: architecture, persistence, monitoring, logging, troubleshooting and capacity. Step-by-step procedures (deploy, upgrade, rollback, secret rotation, backup/restore, incident table) are in [`RUNBOOK.md`](RUNBOOK.md).
 
-Applies to version **2.12.0**.
+Applies to version **2.13.0**.
 
 ## 1. Service overview
 
@@ -75,7 +75,7 @@ UI pod: liveness/readiness `GET /healthz` on port 3000; `API_URL` pointing at th
 ```json
 {
   "status": "degraded",
-  "version": "2.12.0",
+  "version": "2.13.0",
   "timestamp": "2026-10-10T14:22:33.123456+00:00",
   "checks": {
     "output_writable": true,
@@ -174,7 +174,9 @@ Sentry returned an error (401, 404, 429 or network failure). Transient errors (4
 Fewer than 3 events, or identical timestamps. Use a busier project or a wider window.
 
 ### UI shows "Failed to pull data from Sentry"
-- `SENTRY_AUTH_TOKEN` must be set on the **api** service, not the UI.
+- The Sentry token is either connected on the Sentry page (saved as `/app/config/sentry_token`, mode 0600) or set as `SENTRY_AUTH_TOKEN` on the **api** service; the environment variable wins. `GET /config/sentry` shows which is in use without revealing it.
+- Organization tokens (`sntrys_`) get 403 from Sentry: use a personal (`sntryu_`) or internal-integration token with `event:read`, `project:read`, `org:read`.
+- Backups of `config_data` contain the saved token; keep them private (`backup.sh` writes them 0600).
 - The UI reaches the API through `API_URL` (compose sets `http://api:8000`). There is no `NEXT_PUBLIC_API_URL`.
 - Check `docker compose logs ui` for proxy errors and `docker compose logs api` for the matching request ID.
 

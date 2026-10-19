@@ -5,6 +5,18 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-10-19
+
+### Added
+- **Connect Sentry from the UI.** A "Sentry Connection" card on the Sentry page takes a token, checks it with Sentry before saving, and stores it in the `config_data` volume (`/app/config/sentry_token`, mode 0600). It is never returned to the browser or logged. Organization tokens (`sntrys_`) are refused with an explanation. A token in `SENTRY_AUTH_TOKEN` still wins and can't be changed from the UI. New endpoints `GET/POST /config/sentry`.
+- **All organizations, all regions.** The app looks up each sentry.io organization's region (US or EU) automatically, so one token works for every organization; `SENTRY_BASE_URL` is now only needed for self-hosted Sentry. Region URLs are only trusted on `https://*.sentry.io`. New endpoint `GET /ingest/sentry/organizations`.
+- **Organization and project pickers** on the Sentry page, listing everything the token can see (typing a slug still works).
+- MCP tool `list_sentry_organizations`.
+
+### Changed
+- `SENTRY_AUTH_TOKEN` is now optional; docs, `.env.example`, runbook and privacy policy updated. Backups of `config_data` include a UI-connected token.
+- `web/ui/.nvmrc` and `engines` pin Node 22 for local development.
+
 ## [2.12.0] - 2026-10-19
 
 ### Added

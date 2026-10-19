@@ -57,6 +57,7 @@ from modeler.sentry import (
     SentryError,
     list_sentry_projects,
     load_sentry_failures,
+    list_sentry_organizations,
     load_sentry_failures_all,
 )
 
@@ -482,6 +483,13 @@ class ConfigUpdate(BaseModel):
 _SLUG_PATTERN = r"^[a-zA-Z0-9._-]+$"
 
 
+class SentryTokenUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Empty or null removes the saved token.
+    token: Optional[str] = Field(None, max_length=512, pattern=r"^[A-Za-z0-9_.=+/-]*$")
+
+
 class SentryIngestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -556,7 +564,7 @@ async def health_live():
 async def health_check():
     output_writable = await asyncio.to_thread(rm_config.is_writable_dir, rm_config.output_dir())
     config_readable, _ = await asyncio.to_thread(_taxonomy_status)
-    sentry_configured = bool(os.getenv("SENTRY_AUTH_TOKEN", "").strip())
+    sentry_configured = bool((await asyncio.to_thread(_sentry_token_and_source))[0])
     if not (output_writable and config_readable):
         status, code = "error", 503
     elif not sentry_configured:
@@ -1021,11 +1029,75 @@ async def _analyze(t, categorized, t0, filename: str, future_hours: float) -> di
     return result
 
 
-def _sentry_token() -> str:
+def _sentry_token_and_source() -> Tuple[str, str]:
+    """The Sentry token in use and where it came from: the environment wins over one saved from the UI."""
     token = os.getenv("SENTRY_AUTH_TOKEN", "").strip()
+    if token:
+        return token, "environment"
+    try:
+        token = rm_config.sentry_token_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    return (token, "ui") if token else ("", "none")
+
+
+def _sentry_token() -> str:
+    token, _ = _sentry_token_and_source()
     if not token:
-        raise HTTPException(status_code=503, detail="SENTRY_AUTH_TOKEN not configured on the API server")
+        raise HTTPException(status_code=503, detail="No Sentry token: connect one on the Sentry page, "
+                                                    "or set SENTRY_AUTH_TOKEN on the API server")
     return token
+
+
+def _token_type(token: str) -> str:
+    if token.startswith("sntryu_"):
+        return "personal"
+    if token.startswith("sntrys_"):
+        return "organization"
+    return "integration" if token else "none"
+
+
+def _sentry_status() -> dict:
+    token, source = _sentry_token_and_source()
+    return {"configured": bool(token), "source": source, "token_type": _token_type(token)}
+
+
+@app.get("/config/sentry")
+async def get_sentry_config():
+    """Whether a Sentry token is configured and where from. Never returns the token."""
+    return await asyncio.to_thread(_sentry_status)
+
+
+@app.post("/config/sentry")
+async def set_sentry_token(payload: SentryTokenUpdate):
+    """Save (after checking it with Sentry) or remove the Sentry token entered in the UI."""
+    _, source = await asyncio.to_thread(_sentry_token_and_source)
+    if source == "environment":
+        raise HTTPException(status_code=409, detail="The Sentry token is set by SENTRY_AUTH_TOKEN on the server; "
+                                                    "change it there")
+    path = rm_config.sentry_token_path()
+    if not payload.token:
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+        logger.info("Sentry token removed via the UI")
+        return await asyncio.to_thread(_sentry_status)
+    if payload.token.startswith("sntrys_"):
+        raise HTTPException(status_code=422, detail="This is a Sentry organization token (sntrys_), which can't "
+                                                    "read events. Create a personal token (sntryu_) or an internal "
+                                                    "integration token with event:read, project:read and org:read.")
+    cancel = threading.Event()
+    try:
+        orgs = await asyncio.wait_for(
+            asyncio.to_thread(list_sentry_organizations, payload.token, None, cancel),
+            timeout=ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        cancel.set()
+        raise HTTPException(status_code=504, detail="Sentry did not answer in time; token not saved")
+    except SentryError as e:
+        raise HTTPException(status_code=422, detail=f"Sentry rejected this token, so it was not saved: {e}")
+    await asyncio.to_thread(rm_config.atomic_write_text, path, payload.token)
+    logger.info("Sentry token saved via the UI (%s token, %d organizations)", _token_type(payload.token), len(orgs))
+    return {**await asyncio.to_thread(_sentry_status), "organizations": len(orgs)}
 
 
 @app.post("/ingest/sentry")
@@ -1090,6 +1162,28 @@ async def ingest_sentry(payload: SentryIngestRequest):
     if project_counts:
         result["projects"] = dict(sorted(project_counts.items(), key=lambda kv: kv[1], reverse=True))
     return result
+
+
+@app.get("/ingest/sentry/organizations")
+async def list_sentry_organizations_endpoint():
+    """
+    List the Sentry organizations SENTRY_AUTH_TOKEN can see, across all sentry.io
+    regions. Returns {count, organizations: [{slug, name, region}]}.
+    """
+    auth_token = _sentry_token()
+    cancel = threading.Event()
+    try:
+        orgs = await asyncio.wait_for(
+            asyncio.to_thread(list_sentry_organizations, auth_token, None, cancel),
+            timeout=ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        cancel.set()
+        raise HTTPException(status_code=504, detail="Sentry organization listing timed out")
+    except SentryError as e:
+        logger.error("Sentry organization listing failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"count": len(orgs), "organizations": orgs}
 
 
 @app.get("/ingest/sentry/projects")

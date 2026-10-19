@@ -67,7 +67,7 @@ class TestAuth:
 
     @pytest.mark.parametrize("method,path", [
         ("GET", "/config"), ("POST", "/config"), ("GET", "/logs"), ("GET", "/trends"),
-        ("POST", "/logs/prune"), ("POST", "/ingest/sentry"), ("GET", "/ingest/sentry/projects"),
+        ("POST", "/logs/prune"), ("POST", "/ingest/sentry"), ("GET", "/ingest/sentry/projects"), ("GET", "/ingest/sentry/organizations"), ("GET", "/config/sentry"), ("POST", "/config/sentry"),
         ("POST", "/graphql"), ("GET", "/report/AN-20260101-000000/html"),
         ("GET", "/docs"), ("GET", "/redoc"), ("GET", "/openapi.json"), ("GET", "/metrics"),
     ])
@@ -195,7 +195,7 @@ class TestHealth:
     def test_degraded_without_sentry_token(self, client):
         body = client.get("/health").json()
         assert body["status"] == "degraded"
-        assert body["version"] == "2.12.0"
+        assert body["version"] == "2.13.0"
         assert body["checks"] == {"output_writable": True, "config_readable": True,
                                   "sentry_token_configured": False}
         assert body["timestamp"].endswith("+00:00")
@@ -223,7 +223,7 @@ class TestHealth:
 
     def test_version_single_source(self, api_module):
         import modeler
-        assert api_module.app.version == modeler.__version__ == "2.12.0"
+        assert api_module.app.version == modeler.__version__ == "2.13.0"
 
 
 class TestMetrics:
@@ -577,6 +577,87 @@ class TestIngestPipeline:
         assert body["models"] == []
 
 
+class TestSentryTokenFromUI:
+    TOKEN = "sntryu_abc123"
+
+    def _accept(self, api_module, monkeypatch, seen=None):
+        def fake(token, base, cancel):
+            if seen is not None:
+                seen.append(token)
+            return [{"slug": "acme", "name": "Acme", "region": "https://de.sentry.io/api/0"}]
+        monkeypatch.setattr(api_module, "list_sentry_organizations", fake)
+
+    def test_status_when_nothing_configured(self, client):
+        assert client.get("/config/sentry").json() == {"configured": False, "source": "none", "token_type": "none"}
+
+    def test_save_checks_with_sentry_stores_privately_and_never_echoes(self, api_module, client, isolated_dirs,
+                                                                       monkeypatch):
+        seen = []
+        self._accept(api_module, monkeypatch, seen)
+        resp = client.post("/config/sentry", json={"token": self.TOKEN})
+        assert resp.status_code == 200
+        assert resp.json() == {"configured": True, "source": "ui", "token_type": "personal", "organizations": 1}
+        assert seen == [self.TOKEN]
+        saved = isolated_dirs["config"] / "sentry_token"
+        assert saved.read_text() == self.TOKEN
+        assert saved.stat().st_mode & 0o777 == 0o600
+        assert self.TOKEN not in client.get("/config/sentry").text
+        assert client.get("/health").json()["checks"]["sentry_token_configured"] is True
+
+    def test_saved_token_is_used_for_analysis(self, api_module, client, monkeypatch):
+        self._accept(api_module, monkeypatch)
+        client.post("/config/sentry", json={"token": self.TOKEN})
+        used = {}
+
+        def fake(org, project, token, *a, **k):
+            used["token"] = token
+            return (*_synthetic_sentry(), False)
+        monkeypatch.setattr(api_module, "load_sentry_failures", fake)
+        assert client.post("/ingest/sentry", json={"org": "acme", "project": "web"}).status_code == 200
+        assert used["token"] == self.TOKEN
+
+    def test_environment_token_wins_and_cannot_be_overwritten(self, client, sentry_token):
+        assert client.get("/config/sentry").json()["source"] == "environment"
+        _assert_detail(client.post("/config/sentry", json={"token": self.TOKEN}), 409)
+
+    def test_organization_token_rejected_with_explanation(self, client, isolated_dirs):
+        detail = _assert_detail(client.post("/config/sentry", json={"token": "sntrys_xyz"}), 422)
+        assert "organization token" in detail
+        assert not (isolated_dirs["config"] / "sentry_token").exists()
+
+    def test_token_sentry_rejects_is_not_saved(self, api_module, client, isolated_dirs, monkeypatch):
+        def fail(*a):
+            raise api_module.SentryError("Sentry authentication failed (401).")
+        monkeypatch.setattr(api_module, "list_sentry_organizations", fail)
+        assert "not saved" in _assert_detail(client.post("/config/sentry", json={"token": self.TOKEN}), 422)
+        assert not (isolated_dirs["config"] / "sentry_token").exists()
+
+    def test_malformed_token_rejected(self, client):
+        assert client.post("/config/sentry", json={"token": "abc def\n"}).status_code == 422
+
+    def test_remove(self, api_module, client, isolated_dirs, monkeypatch):
+        self._accept(api_module, monkeypatch)
+        client.post("/config/sentry", json={"token": self.TOKEN})
+        assert client.post("/config/sentry", json={"token": ""}).json()["configured"] is False
+        assert not (isolated_dirs["config"] / "sentry_token").exists()
+
+
+class TestSentryOrganizations:
+    def test_requires_token(self, client):
+        _assert_detail(client.get("/ingest/sentry/organizations"), 503)
+
+    def test_lists_organizations(self, api_module, client, sentry_token, monkeypatch):
+        orgs = [{"slug": "acme", "name": "Acme", "region": "https://de.sentry.io/api/0"}]
+        monkeypatch.setattr(api_module, "list_sentry_organizations", lambda token, base, cancel: orgs)
+        assert client.get("/ingest/sentry/organizations").json() == {"count": 1, "organizations": orgs}
+
+    def test_sentry_error(self, api_module, client, sentry_token, monkeypatch):
+        def fail(*a):
+            raise api_module.SentryError("Sentry authentication failed (401).")
+        monkeypatch.setattr(api_module, "list_sentry_organizations", fail)
+        _assert_detail(client.get("/ingest/sentry/organizations"), 502)
+
+
 class TestSentryProjects:
     def test_requires_org(self, client):
         _assert_detail(client.get("/ingest/sentry/projects"), 422)
@@ -761,7 +842,7 @@ class TestReport:
         for aid in ("AN-20260101-000000", "AN-20260101-000000-a1b2c3"):
             _write_log(out, aid, 12, 24.0)
             html = client.get(f"/report/{aid}/html").json()["html"]
-            assert aid in html and "UTC" in html and "2.12.0" in html
+            assert aid in html and "UTC" in html and "2.13.0" in html
             assert "data:image/png" not in html
 
     def test_report_kpis_match_trends_and_na(self, client, isolated_dirs):
@@ -865,7 +946,7 @@ def test_uvicorn_style_import_from_web_api_dir(tmp_path):
         cwd=REPO_ROOT / "web" / "api", env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("2.12.0")
+    assert proc.stdout.strip().endswith("2.13.0")
 
 
 def test_import_refused_without_key(tmp_path):

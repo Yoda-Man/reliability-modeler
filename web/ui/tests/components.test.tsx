@@ -136,8 +136,10 @@ describe('Dashboard', () => {
 
 describe('SentryView', () => {
   it('lets the days field be cleared and sends the horizon with the request', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ configured: false, source: 'none', token_type: 'none' })));
     const onAnalyze = vi.fn(async () => undefined);
     render(<SentryView onAnalyze={onAnalyze} isLoading={false} />);
+    await screen.findByText('Not connected');
     fireEvent.change(screen.getByPlaceholderText('e.g. my-company'), { target: { value: 'acme' } });
     fireEvent.change(screen.getByPlaceholderText('e.g. web-app'), { target: { value: 'web' } });
     const days = screen.getByLabelText(/Look-back Window/) as HTMLInputElement;
@@ -151,6 +153,60 @@ describe('SentryView', () => {
     fireEvent.change(screen.getByLabelText(/Forecast Horizon/), { target: { value: '2500' } });
     fireEvent.click(screen.getByText('Pull & Analyze'));
     await vi.waitFor(() => expect(onAnalyze).toHaveBeenCalledWith('acme', 'web', 7, 2500));
+  });
+});
+
+describe('Sentry connection and pickers', () => {
+  it('connects a token from the UI without ever showing it again', async () => {
+    const calls: Array<{ url: string; body?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: init?.body as string | undefined });
+      if (url === '/api/config/sentry' && init?.method === 'POST') {
+        return jsonResponse({ configured: true, source: 'ui', token_type: 'personal', organizations: 2 });
+      }
+      if (url === '/api/config/sentry') return jsonResponse({ configured: false, source: 'none', token_type: 'none' });
+      return jsonResponse({ organizations: [] });
+    }));
+    render(<SentryView onAnalyze={vi.fn(async () => undefined)} isLoading={false} />);
+    const input = await screen.findByLabelText('Sentry auth token') as HTMLInputElement;
+    expect(input.type).toBe('password');
+    fireEvent.change(input, { target: { value: 'sntryu_secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    expect((await screen.findByRole('status')).textContent).toContain('can see 2 organization(s)');
+    expect(screen.getByText('Connected')).toBeTruthy();
+    expect(JSON.parse(calls.find(c => c.body)!.body!)).toEqual({ token: 'sntryu_secret' });
+    expect((screen.getByLabelText('Replace token') as HTMLInputElement).value).toBe('');
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+  });
+
+  it('hides the token form when the server sets SENTRY_AUTH_TOKEN', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/api/config/sentry'
+      ? jsonResponse({ configured: true, source: 'environment', token_type: 'personal' })
+      : jsonResponse({ organizations: [] })));
+    render(<SentryView onAnalyze={vi.fn(async () => undefined)} isLoading={false} />);
+    expect((await screen.findByText(/set on the server/)).textContent).toContain('Change it there');
+    expect(screen.queryByLabelText(/token/i)).toBeNull();
+  });
+
+  it('offers every organization, then the chosen organization\'s projects', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/config/sentry') return jsonResponse({ configured: true, source: 'ui', token_type: 'personal' });
+      if (url === '/api/ingest/sentry/organizations') return jsonResponse({ count: 2, organizations: [
+        { slug: 'knights-health', name: 'Knights Health', region: 'https://de.sentry.io/api/0' },
+        { slug: 'ngoma-yk', name: 'Ngoma', region: 'https://us.sentry.io/api/0' },
+      ] });
+      if (url === '/api/ingest/sentry/projects?org=knights-health') return jsonResponse({ org: 'knights-health', count: 2,
+        projects: [{ slug: 'dotnet', name: 'dotnet' }, { slug: 'flutter', name: 'flutter' }] });
+      return jsonResponse({ detail: 'unexpected' }, 404);
+    }));
+    const { container } = render(<SentryView onAnalyze={vi.fn(async () => undefined)} isLoading={false} />);
+    await screen.findByText('2 organizations available. Click the field to pick one.');
+    const orgOptions = [...container.querySelectorAll('#sentry-org-options option')].map(o => (o as HTMLOptionElement).value);
+    expect(orgOptions).toEqual(['knights-health', 'ngoma-yk']);
+    fireEvent.change(screen.getByLabelText('Organization'), { target: { value: 'knights-health' } });
+    await screen.findByText('2 projects in knights-health.');
+    const projectOptions = [...container.querySelectorAll('#sentry-project-options option')].map(o => (o as HTMLOptionElement).value);
+    expect(projectOptions).toEqual(['dotnet', 'flutter']);
   });
 });
 

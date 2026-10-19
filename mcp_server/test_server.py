@@ -80,3 +80,15 @@ def test_dotenv_inline_comments_like_compose(tmp_path):
     (tmp_path / ".env").write_text(
         "A=plain # comment\nB='p#q' # c\nC=\"x # y\"\nD=a#b\nE= # empty\n")
     assert server._dotenv(tmp_path / ".env") == {"A": "plain", "B": "p#q", "C": "x # y", "D": "a#b", "E": ""}
+
+
+def test_list_sentry_organizations_calls_api():
+    seen = {}
+
+    def handler(req):
+        seen["path"] = req.url.path
+        return httpx.Response(200, json={"count": 1, "organizations": [{"slug": "acme", "name": "Acme"}]})
+
+    _use(handler)
+    assert server.list_sentry_organizations()["count"] == 1
+    assert seen["path"] == "/api/ingest/sentry/organizations"

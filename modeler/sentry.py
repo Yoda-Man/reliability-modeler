@@ -80,6 +80,63 @@ def _base_url(base_url: Optional[str]) -> str:
     return (base_url or os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
 
 
+# sentry.io hosts organizations in regions (us.sentry.io, de.sentry.io); its
+# control API lists every org the token can see, with each org's region URL.
+CONTROL_API_URL = "https://sentry.io/api/0"
+_org_region: Dict[str, str] = {}  # org slug -> region API base, learned from the control API
+
+
+def _is_saas(url: str) -> bool:
+    """True for sentry.io and its regional hosts; the token is only ever sent to these or SENTRY_BASE_URL."""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return urllib.parse.urlparse(url).scheme == "https" and (host == "sentry.io" or host.endswith(".sentry.io"))
+
+
+def list_sentry_organizations(
+    auth_token: str,
+    base_url: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> List[dict]:
+    """
+    List the organizations the token's user belongs to, across all sentry.io regions
+    (or on a self-hosted SENTRY_BASE_URL). Each dict has slug, name and ``region``
+    (the API base used for that org). Also records each org's region for later calls.
+    """
+    base = _base_url(base_url)
+    root = CONTROL_API_URL if _is_saas(base) else base
+    orgs, _ = _paginate(f"{root}/organizations/?member=1", auth_token, MAX_PROJECT_PAGES, "organization", cancel_event)
+    result = []
+    for o in orgs:
+        if not isinstance(o, dict) or not _SLUG_RE.match(str(o.get("slug", ""))):
+            continue
+        region_url = str((o.get("links") or {}).get("regionUrl") or "")
+        region = f"{region_url.rstrip('/')}/api/0" if _is_saas(base) and _is_saas(region_url) else base
+        _org_region[o["slug"]] = region
+        result.append({"slug": o["slug"], "name": o.get("name") or o["slug"], "region": region})
+    logger.info("Sentry: token can see %d organizations", len(result))
+    return result
+
+
+def _org_base_url(
+    org: str,
+    auth_token: str,
+    base_url: Optional[str],
+    cancel_event: Optional[threading.Event] = None,
+) -> str:
+    """API base for ``org``: its region on sentry.io, otherwise the configured base."""
+    base = _base_url(base_url)
+    if not _is_saas(base):
+        return base
+    if org not in _org_region:
+        try:
+            list_sentry_organizations(auth_token, base_url, cancel_event)
+        except SentryCancelled:
+            raise
+        except SentryError as e:
+            logger.warning("Sentry: could not resolve region for org '%s' (%s); using %s", org, e, base)
+    return _org_region.get(org, base)
+
+
 def _validate_slug(value: str, name: str) -> str:
     """Validate a Sentry org/project slug (defense in depth against URL injection)."""
     if not value or not _SLUG_RE.match(value):
@@ -105,9 +162,10 @@ def _retry_delay(attempt: int, retry_after: Optional[str]) -> float:
 
 def _http_error_message(code: int, resource: str) -> str:
     if code == 401:
-        return "Sentry authentication failed (401). Check SENTRY_AUTH_TOKEN and its scopes."
+        return "Sentry authentication failed (401). Check the Sentry token is valid and not expired."
     if code == 403:
-        return "Sentry denied access (403). Check SENTRY_AUTH_TOKEN scopes."
+        return ("Sentry denied access (403). The token needs event:read, project:read and org:read; "
+                "organization tokens (sntrys_) can't read events.")
     if code == 404:
         return f"Sentry {resource} not found (404). Check the slug."
     if code == 429:
@@ -291,7 +349,7 @@ def list_sentry_projects(
     Returns a list of dicts with keys like: slug, name, platform, status.
     """
     org = _validate_slug(org, "org")
-    url = f"{_base_url(base_url)}/organizations/{urllib.parse.quote(org, safe='')}/projects/"
+    url = f"{_org_base_url(org, auth_token, base_url, cancel_event)}/organizations/{urllib.parse.quote(org, safe='')}/projects/"
     projects, truncated = _paginate(url, auth_token, MAX_PROJECT_PAGES, "organization", cancel_event)
     if truncated:
         logger.warning("Sentry: org '%s' project list truncated at %d pages", org, MAX_PROJECT_PAGES)
@@ -382,7 +440,9 @@ def load_sentry_failures(
     failures and SentryCancelled if ``cancel_event`` is set mid-fetch.
     """
     fault_categories = load_fault_categories(config_path)
-    all_events, truncated = _fetch_project_events(org, project, auth_token, _base_url(base_url), days, cancel_event)
+    org = _validate_slug(org, "org")
+    base = _org_base_url(org, auth_token, base_url, cancel_event)
+    all_events, truncated = _fetch_project_events(org, project, auth_token, base, days, cancel_event)
 
     if not all_events:
         logger.warning("Sentry: no events found for %s/%s in last %d days", org, project, days)
@@ -419,7 +479,8 @@ def load_sentry_failures_all(
     ``truncated`` is True.
     """
     fault_categories = load_fault_categories(config_path)
-    base = _base_url(base_url)
+    org = _validate_slug(org, "org")
+    base = _org_base_url(org, auth_token, base_url, cancel_event)
 
     projects = list_sentry_projects(org, auth_token, base, cancel_event)
     if max_projects is None:

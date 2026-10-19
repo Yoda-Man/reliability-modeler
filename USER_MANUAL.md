@@ -1,6 +1,6 @@
 # Reliability Modeler: User Manual
 
-Version 2.12.0
+Version 2.13.0
 
 ## 1. Introduction
 
@@ -24,11 +24,12 @@ Open the address your administrator gave you (by default `http://<server>:3000`)
 
 1. Check the **System Status** badge at the bottom of the sidebar (see section 4).
 2. Open the **Sentry** tab.
-3. Enter your **organisation slug**.
-4. Choose a **project slug**, or enable **"Analyze all projects"** to aggregate the whole organisation.
-5. Set the **look-back window** (days) and click **Pull & Analyze**.
+3. If **Sentry Connection** says *Not connected*, paste a Sentry token and click **Connect** (first time only). Create it in Sentry: avatar → **User Settings → Personal Tokens → Create New Token** with `event:read`, `project:read` and `org:read`. The token is checked with Sentry, stored privately on the server and never shown again. Organization tokens (`sntrys_`) can't read events and are refused.
+4. Click the **Organization** field and pick one of your organisations (every organisation your token can see is listed, in any Sentry region), or type its slug.
+5. Click the **Project** field and pick a project, or enable **"Analyze all projects"** to aggregate the whole organisation.
+6. Set the **look-back window** (days) and **forecast horizon**, then click **Pull & Analyze**.
 
-The analysis runs on the server (typically a few seconds, up to two minutes for large organisations) and opens the **Dashboard** with your results.
+The analysis runs on the server (typically a few seconds, up to about four minutes for large organisations) and opens the **Dashboard** with your results.
 
 ## 4. System Status badge
 
@@ -37,13 +38,13 @@ The badge in the sidebar checks the server's health automatically.
 | Badge | Meaning | What to do |
 |-------|---------|------------|
 | Green | Everything is working | Nothing |
-| Amber (degraded) | The application works, but the server has no Sentry token, so new analyses will fail | Contact your administrator |
+| Amber (degraded) | The application works, but no Sentry token is connected, so new analyses will fail | Connect a token on the Sentry page, or contact your administrator |
 | Red (unavailable / error) | The server cannot be reached, or its storage is not usable | Wait a minute and reload; if it persists, contact your administrator |
 
 ## 5. Navigating the interface
 
 ### 5.1 Sentry
-The entry point. Enter an org and project (or "all projects"), pick a time window, and pull events from Sentry.
+The entry point. Connect a Sentry token once, pick an organisation and project from the lists (or "all projects"), choose a time window and forecast horizon, and pull events from Sentry. A token set by your administrator (`SENTRY_AUTH_TOKEN`) takes precedence and can't be changed here.
 
 ### 5.2 Dashboard
 The primary view for analysis results.

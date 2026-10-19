@@ -19,6 +19,7 @@ from modeler.data import TaxonomyError
 from modeler.sentry import (
     SentryCancelled,
     SentryError,
+    list_sentry_organizations,
     list_sentry_projects,
     load_sentry_failures,
     load_sentry_failures_all,
@@ -323,3 +324,63 @@ def test_all_projects_not_truncated(fake, taxonomy):
     fake.route(EVENTS, (200, [_event(0), _event(1)], {}))
     *_, counts, truncated = load_sentry_failures_all("acme", "tok", taxonomy, base_url=fake.base)
     assert truncated is False and counts == {"web": 2}
+
+
+# ── Organizations and regions ────────────────────────────────────────────────
+
+def test_is_saas_only_trusts_https_sentry_hosts():
+    assert sentry._is_saas("https://sentry.io/api/0")
+    assert sentry._is_saas("https://de.sentry.io")
+    assert not sentry._is_saas("http://de.sentry.io")          # no plain HTTP
+    assert not sentry._is_saas("https://sentry.io.evil.com")   # look-alike host
+    assert not sentry._is_saas("https://evil.com/sentry.io")
+
+
+def test_self_hosted_lists_orgs_on_configured_base(fake, monkeypatch):
+    monkeypatch.setattr(sentry, "_org_region", {})
+    fake.route("/api/0/organizations/", (200, [{"slug": "acme", "name": "Acme"}, {"slug": "bad/slug"}], {}))
+    orgs = list_sentry_organizations("tok", base_url=fake.base)
+    assert orgs == [{"slug": "acme", "name": "Acme", "region": fake.base.rstrip("/")}]
+    assert fake.requests[0][1] == {"member": ["1"]}
+
+
+def test_saas_resolves_each_org_to_its_region(fake, monkeypatch, taxonomy):
+    """An EU org's projects and events are read from its regional API, not the default host."""
+    root = fake.base[: -len("/api/0/")]
+    monkeypatch.setattr(sentry, "_org_region", {})
+    monkeypatch.setattr(sentry, "_is_saas", lambda url: url.startswith(root))  # treat the fake as sentry.io
+    monkeypatch.setattr(sentry, "CONTROL_API_URL", f"{root}/control/api/0")
+    fake.route("/control/api/0/organizations/",
+               (200, [{"slug": "acme", "name": "Acme", "links": {"regionUrl": f"{root}/eu"}}], {}))
+    fake.route("/eu/api/0/organizations/acme/projects/", (200, [{"slug": "web", "name": "Web"}], {}))
+    fake.route("/eu/api/0/projects/acme/web/events/", (200, [_event(0), _event(1)], fake.link(EVENTS, "x", results=False)))
+
+    assert [p["slug"] for p in list_sentry_projects("acme", "tok", base_url=fake.base)] == ["web"]
+    t, *_ = load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base)
+    assert len(t) == 2
+    paths = [r[0] for r in fake.requests]
+    assert paths.count("/control/api/0/organizations/") == 1  # region looked up once, then cached
+    assert "/eu/api/0/projects/acme/web/events/" in paths
+    assert not any(p.startswith("/api/0/organizations/acme") for p in paths)
+
+
+def test_region_outside_sentry_is_ignored(fake, monkeypatch):
+    """A regionUrl that isn't a Sentry host never receives the token."""
+    root = fake.base[: -len("/api/0/")]
+    monkeypatch.setattr(sentry, "_org_region", {})
+    monkeypatch.setattr(sentry, "_is_saas", lambda url: url.startswith(root))
+    monkeypatch.setattr(sentry, "CONTROL_API_URL", f"{root}/control/api/0")
+    fake.route("/control/api/0/organizations/",
+               (200, [{"slug": "acme", "links": {"regionUrl": "https://evil.example"}}], {}))
+    orgs = list_sentry_organizations("tok", base_url=fake.base)
+    assert orgs[0]["region"] == fake.base.rstrip("/")
+
+
+def test_region_lookup_failure_falls_back_to_base(fake, monkeypatch):
+    root = fake.base[: -len("/api/0/")]
+    monkeypatch.setattr(sentry, "_org_region", {})
+    monkeypatch.setattr(sentry, "_is_saas", lambda url: url.startswith(root))
+    monkeypatch.setattr(sentry, "CONTROL_API_URL", f"{root}/control/api/0")
+    fake.route("/control/api/0/organizations/", (401, {"detail": "no"}, {}))
+    fake.route("/api/0/organizations/acme/projects/", (200, [{"slug": "web"}], {}))
+    assert [p["slug"] for p in list_sentry_projects("acme", "tok", base_url=fake.base)] == ["web"]

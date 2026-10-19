@@ -29,7 +29,7 @@ export default function UserManualView() {
                         </li>
                         <li className="flex items-start bg-slate-900/40 p-4 rounded-xl border border-slate-800">
                             <span className="w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold mr-4 shrink-0">2</span>
-                            <p className="text-sm text-slate-300 leading-relaxed">Enter your <strong>organization</strong> slug and a <strong>project</strong> (or enable &quot;Analyze all projects&quot;).</p>
+                            <p className="text-sm text-slate-300 leading-relaxed">Connect a Sentry token once under <strong>Sentry Connection</strong>, then pick your <strong>organization</strong> and a <strong>project</strong> from the lists (or enable &quot;Analyze all projects&quot;).</p>
                         </li>
                         <li className="flex items-start bg-slate-900/40 p-4 rounded-xl border border-slate-800">
                             <span className="w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold mr-4 shrink-0">3</span>

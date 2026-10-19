@@ -1,8 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Bug, Loader2, Search, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { formatError } from '@/lib/api';
+import { apiJson, formatError } from '@/lib/api';
+import type { SentryOrganization, SentryProject } from '@/lib/types';
+import SentryConnection from '@/components/SentryConnection';
 
 interface SentryViewProps {
     onAnalyze: (org: string, project: string, days: number, futureHours: number) => Promise<void>;
@@ -17,6 +19,33 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
     const [futureHours, setFutureHours] = useState('1000');
     const [analyzeAll, setAnalyzeAll] = useState(false);
     const [error, setError] = useState('');
+    const [connected, setConnected] = useState(false);
+    const [orgs, setOrgs] = useState<SentryOrganization[]>([]);
+    const [projectsFor, setProjectsFor] = useState<{ org: string; list: SentryProject[] }>({ org: '', list: [] });
+    const [listError, setListError] = useState('');
+
+    // Fill the pickers with every organization the token can see, then the chosen org's projects.
+    useEffect(() => {
+        if (!connected) return;
+        let live = true;
+        apiJson<{ organizations: SentryOrganization[] }>('/ingest/sentry/organizations', {}, 'Failed to list organizations')
+            .then(d => { if (live) { setOrgs(d.organizations); setListError(''); } })
+            .catch(err => { if (live) setListError(formatError(err)); });
+        return () => { live = false; };
+    }, [connected]);
+
+    const orgSlug = org.trim();
+    const knownOrg = connected && orgs.some(o => o.slug === orgSlug);
+    useEffect(() => {
+        if (!knownOrg) return;
+        let live = true;
+        apiJson<{ projects: SentryProject[] }>(`/ingest/sentry/projects?org=${encodeURIComponent(orgSlug)}`, {}, 'Failed to list projects')
+            .then(d => { if (live) setProjectsFor({ org: orgSlug, list: d.projects }); })
+            .catch(err => { if (live) setListError(formatError(err)); });
+        return () => { live = false; };
+    }, [knownOrg, orgSlug]);
+    const visibleOrgs = connected ? orgs : [];
+    const projects = knownOrg && projectsFor.org === orgSlug ? projectsFor.list : [];
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -59,33 +88,56 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
                 </p>
             </div>
 
+            <div className="mb-6">
+                <SentryConnection onStatus={setConnected} />
+            </div>
+
             <form onSubmit={handleSubmit} className="space-y-6">
                 <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/50 backdrop-blur-xl space-y-5">
                     <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
-                            Organization Slug
+                        <label htmlFor="sentry-org" className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
+                            Organization
                         </label>
                         <input
+                            id="sentry-org"
                             type="text"
+                            list="sentry-org-options"
+                            autoComplete="off"
                             value={org}
                             onChange={(e) => setOrg(e.target.value)}
-                            placeholder="e.g. my-company"
+                            placeholder={visibleOrgs.length ? 'Choose or type an organization slug' : 'e.g. my-company'}
                             className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
                         />
+                        <datalist id="sentry-org-options">
+                            {visibleOrgs.map(o => <option key={o.slug} value={o.slug} label={o.name} />)}
+                        </datalist>
+                        {visibleOrgs.length > 0 && (
+                            <p className="mt-1 text-xs text-slate-500">{visibleOrgs.length} organizations available. Click the field to pick one.</p>
+                        )}
+                        {listError && <p className="mt-1 text-xs text-amber-400">{listError}</p>}
                     </div>
 
                     <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
-                            Project Slug
+                        <label htmlFor="sentry-project" className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
+                            Project
                         </label>
                         <input
+                            id="sentry-project"
                             type="text"
+                            list="sentry-project-options"
+                            autoComplete="off"
                             value={project}
                             onChange={(e) => setProject(e.target.value)}
-                            placeholder={analyzeAll ? 'All projects selected' : 'e.g. web-app'}
+                            placeholder={analyzeAll ? 'All projects selected' : projects.length ? 'Choose or type a project slug' : 'e.g. web-app'}
                             disabled={analyzeAll}
                             className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         />
+                        <datalist id="sentry-project-options">
+                            {projects.map(p => <option key={p.slug} value={p.slug} label={p.name} />)}
+                        </datalist>
+                        {projects.length > 0 && !analyzeAll && (
+                            <p className="mt-1 text-xs text-slate-500">{projects.length} projects in {orgSlug}.</p>
+                        )}
                     </div>
 
                     <label className="flex items-center space-x-3 p-4 rounded-xl bg-purple-600/5 border border-purple-500/20 cursor-pointer">
@@ -164,11 +216,11 @@ export default function SentryView({ onAnalyze, isLoading }: SentryViewProps) {
                 <ul className="space-y-2 text-sm text-slate-500">
                     <li className="flex items-start space-x-2">
                         <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
-                        <span>The API server must have <code className="text-slate-300">SENTRY_AUTH_TOKEN</code> set (org token with <code className="text-slate-300">event:read</code> scope).</span>
+                        <span>Connect a Sentry personal or integration token above (scopes <code className="text-slate-300">event:read</code>, <code className="text-slate-300">project:read</code>, <code className="text-slate-300">org:read</code>), or set <code className="text-slate-300">SENTRY_AUTH_TOKEN</code> on the API server.</span>
                     </li>
                     <li className="flex items-start space-x-2">
                         <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
-                        <span>For self-hosted Sentry, set <code className="text-slate-300">SENTRY_BASE_URL</code> on the API server.</span>
+                        <span>sentry.io organizations in any region (US or EU) are found automatically. For self-hosted Sentry, set <code className="text-slate-300">SENTRY_BASE_URL</code> on the API server.</span>
                     </li>
                     <li className="flex items-start space-x-2">
                         <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />

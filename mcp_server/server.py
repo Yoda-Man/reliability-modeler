@@ -119,6 +119,12 @@ def get_trends() -> dict:
 
 
 @mcp.tool()
+def list_sentry_organizations() -> dict:
+    """Every Sentry organization the configured token can see, across US and EU regions (slug, name, region)."""
+    return _call("GET", "/ingest/sentry/organizations")
+
+
+@mcp.tool()
 def list_sentry_projects(org: str) -> dict:
     """Sentry projects available in an organization (slug and name)."""
     return _call("GET", "/ingest/sentry/projects", params={"org": org})

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Shield, Lock, Eye, FileText, Database, Share2 } from 'lucide-react';
+import { Shield, Lock, Eye, FileText, Database, Share2, KeyRound } from 'lucide-react';
 
 export default function PrivacyPolicy() {
     return (
@@ -53,6 +53,15 @@ export default function PrivacyPolicy() {
                             </h4>
                             <p className="text-xs text-slate-400 leading-relaxed">
                                 Summaries of your analysis are stored in `/app/output/logs` to power the &quot;Log Archives&quot; feature. You have full control over these files via the host filesystem.
+                            </p>
+                        </div>
+                        <div className="p-6 rounded-2xl bg-slate-900/30 border border-slate-800">
+                            <h4 className="text-white font-medium mb-2 flex items-center">
+                                <KeyRound className="w-4 h-4 mr-2 text-slate-500" />
+                                Sentry Token
+                            </h4>
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                                A token connected on the Sentry page is checked with Sentry, then stored only on this server in <code className="text-slate-500">/app/config/sentry_token</code> (readable by the app alone). It is never shown in the browser, logged or sent anywhere except Sentry. Remove it on the Sentry page at any time.
                             </p>
                         </div>
                     </div>
