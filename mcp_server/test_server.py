@@ -120,3 +120,21 @@ def test_latest_with_no_analyses_is_a_clear_error():
     _use(lambda req: httpx.Response(200, json={"total": 0, "logs": []}))
     with pytest.raises(ToolError, match="run_analysis first"):
         server.get_failure_context("Database")
+
+
+def test_brief_issues_and_issue_context_use_the_right_endpoints():
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.path, dict(req.url.params)))
+        if req.url.path == "/api/logs":
+            return httpx.Response(200, json={"total": 1, "logs": [{"id": "AN-20261019-130000-abcdef"}]})
+        return httpx.Response(200, json={"ok": True})
+
+    _use(handler)
+    server.get_analysis_brief()
+    server.list_top_issues(limit=3)
+    server.get_issue_context("4242", analysis_id="AN-20261019-120000-abcdef")
+    assert seen[1][0] == "/api/analyses/AN-20261019-130000-abcdef/brief"
+    assert seen[3] == ("/api/analyses/AN-20261019-130000-abcdef/issues", {"limit": "3"})
+    assert seen[4][0] == "/api/analyses/AN-20261019-120000-abcdef/issues/4242/context"

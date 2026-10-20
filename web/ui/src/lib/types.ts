@@ -45,6 +45,40 @@ export interface AnalysisResults {
     graph_insights?: string[];
     graph_report?: GraphReport | null;
     projects?: Record<string, number>;
+    /** Top 10 Sentry issues by event count (absent before 2.15). */
+    top_issues?: TopIssue[];
+    warnings?: AnalysisWarning[];
+    /** Events excluded by the taxonomy's Ignore rule. */
+    ignored?: IgnoredSummary;
+}
+
+/** One Sentry issue (bug) ranked by events in this analysis. */
+export interface TopIssue {
+    group_id: string;
+    project: string;
+    title: string;
+    culprit: string | null;
+    location: string | null;
+    category: string;
+    count: number;
+    /** count / total kept events, 0..1 */
+    share: number;
+    first_seen: string;
+    last_seen: string;
+    /** >= 80% of this issue's events within 24h (and >= 20 events). */
+    burst: boolean;
+    /** null for self-hosted Sentry. */
+    sentry_url: string | null;
+}
+
+export interface AnalysisWarning {
+    code: 'coarse_taxonomy' | 'dominant_issue' | 'burst' | 'noise_ignored' | 'truncated';
+    message: string;
+}
+
+export interface IgnoredSummary {
+    count: number;
+    top_titles: Array<{ title: string; count: number }>;
 }
 
 export interface LogEntry {

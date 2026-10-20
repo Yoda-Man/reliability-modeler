@@ -17,6 +17,7 @@ import {
 
 import type { AnalysisResults, CategorizedFailure, GraphReport } from '@/lib/types';
 import FailureNetworkGraph from '@/components/FailureNetworkGraph';
+import TopIssues, { AnalysisWarnings } from '@/components/TopIssues';
 
 // ── Color Palette ───────────────────────────────────────────────────────────
 
@@ -392,6 +393,8 @@ export default function Dashboard({ data }: { data: AnalysisResults }) {
                 </div>
             )}
 
+            <AnalysisWarnings warnings={data.warnings} ignored={data.ignored} skipTruncated={!!data.truncated} />
+
             {!bestModel && (
                 <div role="status" className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-start space-x-3">
                     <AlertTriangle className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" />
@@ -420,6 +423,8 @@ export default function Dashboard({ data }: { data: AnalysisResults }) {
                     icon={<Zap className="text-purple-500 w-4 h-4" />}
                     description="Failures per hour" tooltip="Overall failure intensity across the observation period." />
             </div>
+
+            <TopIssues issues={data.top_issues} />
 
             {/* ── Project Breakdown (Sentry multi-project) ─────────────────── */}
             {data.projects && Object.keys(data.projects).length > 0 && (

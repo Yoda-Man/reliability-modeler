@@ -150,6 +150,10 @@ export default function ConfigView() {
                         <p className="text-sm text-slate-400 mb-6 font-medium">
                             Define keyword mappings for automatic failure classification. (Format: <span className="text-blue-400">Category [keyword1, keyword2]</span>)
                         </p>
+                        <p className="text-xs text-slate-500 -mt-4 mb-6">
+                            To drop noise, add an Ignore line, e.g. <code className="text-blue-400">Ignore [miner.invalid, origin http://5.]</code>: events
+                            matching an Ignore line are left out of models, graphs and rankings and counted as noise.
+                        </p>
                         <textarea
                             value={settings.taxonomy_content}
                             onChange={(e) => setSettings({ ...settings, taxonomy_content: e.target.value })}

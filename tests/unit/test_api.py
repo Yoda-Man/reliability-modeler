@@ -67,7 +67,7 @@ class TestAuth:
 
     @pytest.mark.parametrize("method,path", [
         ("GET", "/config"), ("POST", "/config"), ("GET", "/logs"), ("GET", "/trends"),
-        ("POST", "/logs/prune"), ("POST", "/ingest/sentry"), ("GET", "/ingest/sentry/projects"), ("GET", "/ingest/sentry/organizations"), ("GET", "/config/sentry"), ("GET", "/analyses/latest/context?category=x"), ("POST", "/config/sentry"),
+        ("POST", "/logs/prune"), ("POST", "/ingest/sentry"), ("GET", "/ingest/sentry/projects"), ("GET", "/ingest/sentry/organizations"), ("GET", "/config/sentry"), ("GET", "/analyses/latest/context?category=x"), ("GET", "/analyses/latest/issues"), ("GET", "/analyses/latest/brief"), ("POST", "/config/sentry"),
         ("POST", "/graphql"), ("GET", "/report/AN-20260101-000000/html"),
         ("GET", "/docs"), ("GET", "/redoc"), ("GET", "/openapi.json"), ("GET", "/metrics"),
     ])
@@ -195,7 +195,7 @@ class TestHealth:
     def test_degraded_without_sentry_token(self, client):
         body = client.get("/health").json()
         assert body["status"] == "degraded"
-        assert body["version"] == "2.14.0"
+        assert body["version"] == "2.15.0"
         assert body["checks"] == {"output_writable": True, "config_readable": True,
                                   "sentry_token_configured": False}
         assert body["timestamp"].endswith("+00:00")
@@ -223,7 +223,7 @@ class TestHealth:
 
     def test_version_single_source(self, api_module):
         import modeler
-        assert api_module.app.version == modeler.__version__ == "2.14.0"
+        assert api_module.app.version == modeler.__version__ == "2.15.0"
 
 
 class TestMetrics:
@@ -359,7 +359,7 @@ class TestIngestPipeline:
     def test_single_project_success(self, api_module, client, sentry_token, monkeypatch, isolated_dirs):
         calls = {}
 
-        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_index=None):
             calls.update(org=org, project=project, token=token, days=days, config_path=config_path)
             return (*_synthetic_sentry(), False)
 
@@ -449,7 +449,7 @@ class TestIngestPipeline:
         assert all(NEW_ID_RE.match(i) for i in ids)
 
     def test_all_projects(self, api_module, client, sentry_token, monkeypatch):
-        def fake_all(org, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
+        def fake_all(org, token, config_path, days, multi_label, cancel_event=None, event_index=None):
             t, cat, t0, cats = _synthetic_sentry(multi=True)
             return t, cat, t0, cats, {"api": 10, "web": 30}, False
 
@@ -459,7 +459,7 @@ class TestIngestPipeline:
         assert body["truncated"] is False
 
     def test_all_projects_truncated_flag(self, api_module, client, sentry_token, monkeypatch):
-        def fake_all(org, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
+        def fake_all(org, token, config_path, days, multi_label, cancel_event=None, event_index=None):
             t, cat, t0, cats = _synthetic_sentry()
             return t, cat, t0, cats, {"api": 40}, True
 
@@ -550,7 +550,7 @@ class TestIngestPipeline:
                                                   "tolerance": 1e-5}})
         seen = {}
 
-        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_index=None):
             seen["multi_label"] = multi_label
             return (*_synthetic_sentry(), False)
 
@@ -588,13 +588,14 @@ class TestFailureContext:
             {"org": "acme", "samples": samples or {"Database": [self.REF, dict(self.REF, event_id="b" * 32)]}}))
 
     def test_ingest_saves_samples_for_the_analysis(self, api_module, client, sentry_token, isolated_dirs, monkeypatch):
-        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_samples=None):
-            event_samples["Database"] = [self.REF]
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_index=None):
+            event_index.setdefault("samples", {})["Database"] = [self.REF]
             return (*_synthetic_sentry(), False)
         monkeypatch.setattr(api_module, "load_sentry_failures", fake)
         aid = client.post("/ingest/sentry", json={"org": "acme", "project": "web"}).json()["id"]
         saved = json.loads((isolated_dirs["output"] / "samples" / f"{aid}.json").read_text())
-        assert saved == {"org": "acme", "samples": {"Database": [self.REF]}}
+        assert saved["org"] == "acme" and saved["samples"] == {"Database": [self.REF]}
+        assert saved["source"] == "sentry://acme/web (30d)" and saved["issues"] == []
 
     def test_returns_live_context_and_keeps_partial_results(self, api_module, client, sentry_token, isolated_dirs,
                                                             monkeypatch):
@@ -648,6 +649,101 @@ class TestFailureContext:
         old = time.time() - 100 * 86400
         os.utime(f, (old, old))
         assert api_module.prune_output(90)["samples"] == [f.name]
+
+
+class TestAgentInsights:
+    AID = "AN-20261019-130000-abcdef"
+
+    def _issue(self, gid, title, count, category="General Error", burst=False, share=None):
+        return {"group_id": gid, "project": "node", "title": title, "culprit": "app in run", "location": "/app/x.js",
+                "category": category, "count": count, "first_seen": "2026-10-01T00:00:00Z",
+                "last_seen": "2026-10-19T00:00:00Z", "sample_event_id": gid.rjust(32, "0"), "burst": burst,
+                "sentry_url": f"https://acme.sentry.io/issues/{gid}/", **({"share": share} if share is not None else {})}
+
+    def test_ingest_returns_top_issues_warnings_and_ignored(self, api_module, client, sentry_token, isolated_dirs,
+                                                            monkeypatch):
+        t, cat, t0, cats = _synthetic_sentry(n=40)
+        cat = [(r[0], r[1], "General Error", r[3]) for r in cat]
+
+        def fake(org, project, token, config_path, days, multi_label, cancel_event=None, event_index=None):
+            event_index["issues"] = {"1": dict(self._issue("1", "Invariant failed", 30), _times=[0.0] * 30),
+                                     "2": dict(self._issue("2", "CORS rejected", 10), _times=[])}
+            event_index["ignored"] = {"count": 4, "titles": {"miner.invalid probe": 4}}
+            return t, cat, t0, cats, False
+        monkeypatch.setattr(api_module, "load_sentry_failures", fake)
+        body = client.post("/ingest/sentry", json={"org": "acme", "project": "node"}).json()
+        assert [i["title"] for i in body["top_issues"]] == ["Invariant failed", "CORS rejected"]
+        assert body["top_issues"][0]["share"] == 0.75 and body["top_issues"][0]["burst"] is True
+        assert "sample_event_id" not in body["top_issues"][0]
+        assert {w["code"] for w in body["warnings"]} == {"coarse_taxonomy", "dominant_issue", "burst", "noise_ignored"}
+        assert body["ignored"] == {"count": 4, "top_titles": [{"title": "miner.invalid probe", "count": 4}]}
+        saved = json.loads((isolated_dirs["output"] / "samples" / f"{body['id']}.json").read_text())
+        assert saved["issues"][0]["sample_event_id"] and saved["warnings"] == body["warnings"]
+
+    def _store(self, isolated_dirs, **extra):
+        d = isolated_dirs["output"] / "samples"
+        d.mkdir(parents=True, exist_ok=True)
+        stored = {"org": "acme", "source": "sentry://acme/node (30d)", "samples": {},
+                  "issues": [self._issue("1", "Invariant failed", 700, share=0.7),
+                             self._issue("2", "CORS rejected", 280, category="Network", share=0.28)],
+                  "ignored": {"count": 0, "top_titles": []},
+                  "warnings": [{"code": "coarse_taxonomy", "message": "too coarse"}],
+                  "models": [{"name": "Goel-Okumoto", "aic": 10.0, "total_expected_failures": 1100.0},
+                             {"name": "Musa-Okumoto", "aic": 12.0, "total_expected_failures": 1300.0}],
+                  "keystones": [{"name": "General Error", "pagerank": 0.5, "is_bridge": True}],
+                  "top_cascade": None, **extra}
+        (d / f"{self.AID}.json").write_text(json.dumps(stored))
+
+    def test_issues_endpoint_and_limit(self, client, isolated_dirs):
+        self._store(isolated_dirs)
+        body = client.get("/analyses/latest/issues", params={"limit": 1}).json()
+        assert body["analysis_id"] == self.AID and [i["group_id"] for i in body["issues"]] == ["1"]
+        assert "sample_event_id" not in body["issues"][0]
+
+    def test_issues_missing_for_old_analyses(self, client, isolated_dirs):
+        d = isolated_dirs["output"] / "samples"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{self.AID}.json").write_text(json.dumps({"org": "acme", "samples": {}}))
+        assert "before 2.15" in _assert_detail(client.get(f"/analyses/{self.AID}/issues"), 404)
+
+    def test_issue_context_fetches_the_issue_sample(self, api_module, client, sentry_token, isolated_dirs,
+                                                    monkeypatch):
+        self._store(isolated_dirs)
+        seen = []
+        monkeypatch.setattr(api_module, "get_event_context",
+                            lambda org, project, eid, *a: seen.append((org, project, eid)) or {"event_id": eid})
+        body = client.get(f"/analyses/{self.AID}/issues/2/context").json()
+        assert seen == [("acme", "node", "2".rjust(32, "0"))]
+        assert body["issue"]["title"] == "CORS rejected" and body["event"]["event_id"] == "2".rjust(32, "0")
+        _assert_detail(client.get(f"/analyses/{self.AID}/issues/999/context"), 404)
+
+    def test_brief_combines_everything(self, client, isolated_dirs):
+        self._store(isolated_dirs)
+        _write_log(isolated_dirs["output"], self.AID, 1000, 660.0, file="sentry://acme/node (30d)")
+        b = client.get("/analyses/latest/brief").json()
+        assert b["analysis_id"] == self.AID and b["source"] == "sentry://acme/node (30d)"
+        assert b["mtbf_hours"] == 0.66 and b["trend"] == "single_run"
+        assert b["best_model"] == {"name": "Goel-Okumoto", "aic": 10.0, "expected_remaining": 100.0}
+        assert [i["group_id"] for i in b["top_issues"]] == ["1", "2"]
+        assert b["next_steps"][0].startswith('Fix "Invariant failed" (700 events, 70%)')
+        assert 'get_issue_context(group_id="1")' in b["next_steps"][0]
+        assert any("taxonomy" in step for step in b["next_steps"])
+
+    def test_brief_only_recommends_issues_above_one_percent(self, client, isolated_dirs):
+        self._store(isolated_dirs, issues=[self._issue("1", "Big", 700, share=0.7),
+                                           self._issue("3", "Tiny", 4, share=0.004)])
+        steps = client.get(f"/analyses/{self.AID}/brief").json()["next_steps"]
+        assert any('"Big"' in st for st in steps) and not any('"Tiny"' in st for st in steps)
+
+    def test_brief_without_models_says_so(self, client, isolated_dirs):
+        self._store(isolated_dirs, models=[], warnings=[])
+        steps = client.get(f"/analyses/{self.AID}/brief").json()["next_steps"]
+        assert any("No reliability-growth model" in step for step in steps)
+
+    def test_warnings_quiet_for_healthy_analysis(self, api_module):
+        cat = [("t", float(i), ["Database", "Network", "Memory"][i % 3], "d") for i in range(30)]
+        issues = [dict(self._issue(str(g), f"bug {g}", 10, category="Database")) for g in range(3)]
+        assert api_module._analysis_warnings(cat, issues, {"count": 0}, False) == []
 
 
 class TestSentryTokenFromUI:
@@ -915,7 +1011,7 @@ class TestReport:
         for aid in ("AN-20260101-000000", "AN-20260101-000000-a1b2c3"):
             _write_log(out, aid, 12, 24.0)
             html = client.get(f"/report/{aid}/html").json()["html"]
-            assert aid in html and "UTC" in html and "2.14.0" in html
+            assert aid in html and "UTC" in html and "2.15.0" in html
             assert "data:image/png" not in html
 
     def test_report_kpis_match_trends_and_na(self, client, isolated_dirs):
@@ -1019,7 +1115,7 @@ def test_uvicorn_style_import_from_web_api_dir(tmp_path):
         cwd=REPO_ROOT / "web" / "api", env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("2.14.0")
+    assert proc.stdout.strip().endswith("2.15.0")
 
 
 def test_import_refused_without_key(tmp_path):

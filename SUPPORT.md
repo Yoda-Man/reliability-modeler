@@ -2,7 +2,7 @@
 
 Reference for operators: architecture, persistence, monitoring, logging, troubleshooting and capacity. Step-by-step procedures (deploy, upgrade, rollback, secret rotation, backup/restore, incident table) are in [`RUNBOOK.md`](RUNBOOK.md).
 
-Applies to version **2.14.0**.
+Applies to version **2.15.0**.
 
 ## 1. Service overview
 
@@ -75,7 +75,7 @@ UI pod: liveness/readiness `GET /healthz` on port 3000; `API_URL` pointing at th
 ```json
 {
   "status": "degraded",
-  "version": "2.14.0",
+  "version": "2.15.0",
   "timestamp": "2026-10-10T14:22:33.123456+00:00",
   "checks": {
     "output_writable": true,

@@ -1,6 +1,6 @@
 # Reliability Modeler: User Manual
 
-Version 2.14.0
+Version 2.15.0
 
 ## 1. Introduction
 
@@ -55,6 +55,8 @@ The primary view for analysis results.
 - **Risk Landscape**: categories plotted by failure count x graph centrality.
 - **Failure Heatmap**: failure density by day of week and hour of day.
 - **Fault Network Intelligence**: keystone categories and failure cascades.
+- **Top Issues**: the Sentry issues behind the failures, ranked by event count. Each row is one bug: its share of all failures, where it happens (culprit or file), when it was last seen, a **burst** badge when most of its events came within 24 hours, and a link to it in Sentry. Fix from the top.
+- **Warnings** (amber notes): when most failures fall in catch-all categories (refine the taxonomy), when one issue dominates (the forecast mostly reflects that bug), when an issue bursts, and how many events Ignore rules left out.
 - **Failure Network**: an interactive graph of all categories. Bigger circles carry more failure traffic (PageRank); colours group categories that fail together; a solid ring marks a keystone and a dashed ring a bridge. Grey lines show how often two categories occur together; amber arrows show cascades (one failure type followed by another). Hover or tab to a category to highlight its links, click it to list what it triggers and what triggers it, and use the checkboxes to hide either edge type.
 - **Project Breakdown**: which Sentry project contributes the most failures (when analysing "all projects").
 
@@ -65,7 +67,7 @@ Cross-run comparison: is MTBF improving or degrading across analysis sessions?
 A record of past analysis sessions, searchable and paginated. Each entry has an ID such as `AN-20261010-142233-a1b2c3` (date, UTC time and a short unique suffix). Older entries have IDs without the suffix; both work. Analyses older than the retention period (90 days by default) are removed automatically.
 
 ### 5.5 Configurations
-- **Fault Taxonomy**: map keywords to categories (e.g. `Memory [leak, oom, heap]`).
+- **Fault Taxonomy**: map keywords to categories (e.g. `Memory [leak, oom, heap]`). A line named `Ignore` (e.g. `Ignore [miner.invalid, origin http://5.]`) marks noise such as bot probes: matching events are left out of models, graphs and rankings and reported as ignored.
 - **Multi-Label Tagging**: allow a failure to belong to multiple categories.
 - **Advanced Engine Settings**: optimisation algorithm and fitting tolerance.
 

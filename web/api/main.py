@@ -47,7 +47,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from modeler import __version__
 from modeler import config as rm_config
-from modeler.data import TaxonomyError, load_fault_categories, parse_fault_categories
+from modeler.data import UNCATEGORIZED, TaxonomyError, load_fault_categories, parse_fault_categories
 from modeler.graphs import build_failure_graphs, generate_graph_insights
 from modeler.logutil import configure_logging, request_id_var
 from modeler.models import fit_model, go_mu, mo_mu, go_intensity, mo_intensity
@@ -60,6 +60,7 @@ from modeler.sentry import (
     list_sentry_organizations,
     load_sentry_failures_all,
     get_event_context,
+    finalize_event_index,
 )
 
 try:
@@ -714,40 +715,33 @@ def _latest_samples_id() -> Optional[str]:
     return max(files, key=lambda f: f.stat().st_mtime).stem if files else None
 
 
-@app.get("/analyses/{analysis_id}/context")
-async def get_failure_context(analysis_id: str, category: str, limit: int = 3):
-    """
-    Stack traces and context for recent Sentry events in one category of an analysis
-    (``latest`` = the newest analysis). Fetched live from Sentry; nothing is stored.
-    Local variables, request and user data are never included.
-    """
+async def _load_index(analysis_id: str) -> Tuple[str, dict]:
+    """Resolve ``latest`` and load the analysis' stored event index (samples, issues, warnings...)."""
     if analysis_id == "latest":
         analysis_id = await asyncio.to_thread(_latest_samples_id) or ""
         if not analysis_id:
-            raise HTTPException(status_code=404, detail="No analysis with event samples yet; run an analysis first")
+            raise HTTPException(status_code=404, detail="No analysis with event data yet; run an analysis first")
     if not ANALYSIS_ID_RE.match(analysis_id):
         raise HTTPException(status_code=400, detail="Invalid analysis ID")
-    limit = max(1, min(limit, 5))
     path = _safe_child(rm_config.samples_dir(), f"{analysis_id}.json")
     try:
-        stored = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+        return analysis_id, json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"No event samples for {analysis_id}; analyses before "
-                                                    f"2.14 don't have them, so run a new analysis")
+        raise HTTPException(status_code=404, detail=f"No event data for {analysis_id}; analyses before "
+                                                    f"2.14 don't have it, so run a new analysis")
     except (OSError, ValueError):
-        logger.warning("Unreadable samples file for %s", analysis_id, exc_info=True)
-        raise HTTPException(status_code=500, detail="Event samples for this analysis are unreadable")
-    samples = stored.get("samples") or {}
-    if category not in samples:
-        raise HTTPException(status_code=404, detail=f"Category {category!r} not in this analysis; "
-                                                    f"available: {', '.join(sorted(samples))}")
+        logger.warning("Unreadable event index for %s", analysis_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Event data for this analysis is unreadable")
+
+
+async def _fetch_events(org: str, refs: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """Fetch and summarise Sentry events; one missing event doesn't sink the rest."""
     auth_token = _sentry_token()
-    org = str(stored.get("org", ""))
     cancel = threading.Event()
 
     def fetch_all():
         events, errors = [], []
-        for ref in samples[category][:limit]:
+        for ref in refs:
             try:
                 events.append(get_event_context(org, str(ref.get("project", "")), str(ref.get("event_id", "")),
                                                 auth_token, None, cancel))
@@ -766,7 +760,147 @@ async def get_failure_context(analysis_id: str, category: str, limit: int = 3):
         raise HTTPException(status_code=502, detail=str(e))
     if not events and errors:
         raise HTTPException(status_code=502, detail=f"Could not fetch any sample event: {errors[0]['detail']}")
+    return events, errors
+
+
+@app.get("/analyses/{analysis_id}/context")
+async def get_failure_context(analysis_id: str, category: str, limit: int = 3):
+    """
+    Stack traces and context for recent Sentry events in one category of an analysis
+    (``latest`` = the newest analysis). Fetched live from Sentry; nothing is stored.
+    Local variables, request and user data are never included.
+    """
+    analysis_id, stored = await _load_index(analysis_id)
+    samples = stored.get("samples") or {}
+    if category not in samples:
+        raise HTTPException(status_code=404, detail=f"Category {category!r} not in this analysis; "
+                                                    f"available: {', '.join(sorted(samples))}")
+    org = str(stored.get("org", ""))
+    events, errors = await _fetch_events(org, samples[category][:max(1, min(limit, 5))])
     return {"analysis_id": analysis_id, "org": org, "category": category, "events": events, "errors": errors}
+
+
+def _public_issue(issue: dict) -> dict:
+    return {k: v for k, v in issue.items() if k != "sample_event_id"}
+
+
+def _stored_issues(analysis_id: str, stored: dict) -> List[dict]:
+    if "issues" not in stored:
+        raise HTTPException(status_code=404, detail=f"No issue data for {analysis_id}; analyses before 2.15 "
+                                                    f"don't have it, so run a new analysis")
+    return stored["issues"]
+
+
+@app.get("/analyses/{analysis_id}/issues")
+async def list_analysis_issues(analysis_id: str, limit: int = 20):
+    """Sentry issues of an analysis ranked by event count: one row per bug to fix."""
+    analysis_id, stored = await _load_index(analysis_id)
+    issues = _stored_issues(analysis_id, stored)[:max(1, min(limit, 50))]
+    return {"analysis_id": analysis_id, "org": stored.get("org"), "issues": [_public_issue(i) for i in issues]}
+
+
+@app.get("/analyses/{analysis_id}/issues/{group_id}/context")
+async def get_issue_context(analysis_id: str, group_id: str):
+    """Stack trace and context of the most recent event of one Sentry issue in an analysis."""
+    analysis_id, stored = await _load_index(analysis_id)
+    issue = next((i for i in _stored_issues(analysis_id, stored) if i.get("group_id") == group_id), None)
+    if issue is None:
+        raise HTTPException(status_code=404, detail=f"Issue {group_id} is not part of {analysis_id}")
+    if not issue.get("sample_event_id"):
+        raise HTTPException(status_code=404, detail="Sentry gave no event id for this issue")
+    org = str(stored.get("org", ""))
+    events, _ = await _fetch_events(org, [{"project": issue["project"], "event_id": issue["sample_event_id"]}])
+    return {"analysis_id": analysis_id, "org": org, "issue": _public_issue(issue), "event": events[0]}
+
+
+@app.get("/analyses/{analysis_id}/brief")
+async def get_analysis_brief(analysis_id: str):
+    """Everything an agent needs about one analysis in one call: verdict, trend, top issues,
+    keystones, warnings and concrete next steps."""
+    analysis_id, stored = await _load_index(analysis_id)
+    log_path = _safe_child(rm_config.logs_dir(), f"{analysis_id}.json")
+    try:
+        entry = json.loads(await asyncio.to_thread(log_path.read_text, encoding="utf-8"))
+    except (OSError, ValueError):
+        entry = {}
+    summary = entry.get("summary") or {}
+    total, hours = summary.get("total_failures"), summary.get("duration_hours")
+    mtbf, _ = _mtbf_and_rate(total, hours)
+    models = stored.get("models") or []
+    best = min(models, key=lambda m: m.get("aic", float("inf"))) if models else None
+    best_model = None
+    if best:
+        expected = best.get("total_expected_failures")
+        best_model = {"name": best.get("name"), "aic": best.get("aic"),
+                      "expected_remaining": round(expected - total, 1) if expected is not None and total else None}
+    trends = await get_trends()
+    source = stored.get("source") or entry.get("file")
+    group = next((g for g in trends.get("groups", []) if g.get("file") == source), None)
+    issues = stored.get("issues") or []
+    warnings = stored.get("warnings") or []
+
+    def pct(share: float) -> str:
+        return f"{share * 100:.0f}%" if share >= 0.01 else f"{share * 100:.1f}%"
+
+    worth_fixing = [i for i in issues[:3] if i.get("share", 0) >= 0.01] or issues[:1]
+    steps = [f"Fix \"{i['title']}\" ({i['count']} events, {pct(i.get('share', 0))}): "
+             f"get_issue_context(group_id=\"{i['group_id']}\") shows its stack trace." for i in worth_fixing]
+    if any(w.get("code") == "coarse_taxonomy" for w in warnings):
+        steps.append("Refine the fault taxonomy (Configurations) with categories for the top errors, "
+                     "then re-run: the failure graph and keystones will become meaningful.")
+    if not models:
+        steps.append("No reliability-growth model fits this data (no improving trend or too few events): "
+                     "judge reliability by the top issues and the trend instead of the forecast.")
+    return {
+        "analysis_id": analysis_id,
+        "source": source,
+        "date": entry.get("date"),
+        "total_failures": total,
+        "duration_hours": hours,
+        "mtbf_hours": mtbf,
+        "best_model": best_model,
+        "trend": group.get("trend") if group else "insufficient_data",
+        "top_issues": [_public_issue(i) for i in issues[:5]],
+        "keystones": stored.get("keystones") or [],
+        "top_cascade": stored.get("top_cascade"),
+        "warnings": warnings,
+        "ignored": stored.get("ignored") or {"count": 0, "top_titles": []},
+        "next_steps": steps,
+    }
+
+
+# Catch-all buckets: when they hold most events, categories carry little information.
+GENERIC_CATEGORIES = {UNCATEGORIZED, "General Error"}
+
+
+def _analysis_warnings(categorized: list, issues: List[dict], ignored: dict, truncated: bool) -> List[dict]:
+    """Plain-English warnings about how far the analysis can be trusted, for people and agents."""
+    warnings = []
+    n = len(categorized)
+    generic = sum(1 for row in categorized if str(row[2]).split(",")[0].strip() in GENERIC_CATEGORIES)
+    if n and generic / n >= 0.5:
+        generic_issues = [i for i in issues if i.get("category") in GENERIC_CATEGORIES][:3]
+        examples = "; ".join(f"\"{i['title'][:60]}\" ({i['count']})" for i in generic_issues)
+        warnings.append({"code": "coarse_taxonomy", "message": (
+            f"{generic / n:.0%} of failures fall in catch-all categories ({', '.join(sorted(GENERIC_CATEGORIES))}), "
+            f"so the failure graph says little. Add taxonomy rules for the top errors"
+            + (f", for example: {examples}." if examples else "."))})
+    if issues and n and issues[0]["count"] / n >= 0.5:
+        top = issues[0]
+        warnings.append({"code": "dominant_issue", "message": (
+            f"One issue causes {top['count'] / n:.0%} of failures (\"{top['title'][:80]}\"). Reliability models "
+            f"assume independent failures, so the forecast mostly reflects this one bug: fix it, then re-run.")})
+    for issue in [i for i in issues[:10] if i.get("burst")][:3]:
+        warnings.append({"code": "burst", "message": (
+            f"\"{issue['title'][:80]}\" fired {issue['count']} times, mostly within 24 hours. A burst like this "
+            f"can distort the fitted trend.")})
+    if ignored.get("count"):
+        warnings.append({"code": "noise_ignored", "message": (
+            f"{ignored['count']} events matched Ignore rules in the taxonomy and were left out.")})
+    if truncated:
+        warnings.append({"code": "truncated", "message": (
+            "Some busy projects hit Sentry's per-project event cap; the timeline was trimmed to a common start.")})
+    return warnings
 
 
 @app.get("/report/{analysis_id}/html")
@@ -1186,19 +1320,19 @@ async def ingest_sentry(payload: SentryIngestRequest):
     cancel = threading.Event()
     project_counts: Dict[str, int] = {}
     truncated = False
-    samples: Dict[str, List[dict]] = {}
+    index: Dict = {}
     try:
         if project == "all":
             t, categorized, t0, _, project_counts, truncated = await asyncio.wait_for(
                 asyncio.to_thread(load_sentry_failures_all, org, auth_token, config_path, days,
-                                  settings.multi_label, cancel_event=cancel, event_samples=samples),
+                                  settings.multi_label, cancel_event=cancel, event_index=index),
                 timeout=ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/ALL_PROJECTS ({days}d)"
         else:
             t, categorized, t0, _, truncated = await asyncio.wait_for(
                 asyncio.to_thread(load_sentry_failures, org, project, auth_token, config_path, days,
-                                  settings.multi_label, cancel_event=cancel, event_samples=samples),
+                                  settings.multi_label, cancel_event=cancel, event_index=index),
                 timeout=ANALYSIS_TIMEOUT_SECONDS,
             )
             display_name = f"sentry://{org}/{project} ({days}d)"
@@ -1223,12 +1357,24 @@ async def ingest_sentry(payload: SentryIngestRequest):
 
     result = await _analyze(t, categorized, t0, display_name, payload.future_hours)
     result["truncated"] = bool(truncated)
-    if samples:
-        try:
-            await asyncio.to_thread(rm_config.atomic_write_json, rm_config.samples_dir() / f"{result['id']}.json",
-                                    {"org": org, "samples": samples})
-        except OSError:
-            logger.warning("Could not save event samples for %s", result["id"], exc_info=True)
+    index = finalize_event_index(index, org)
+    n = len(categorized)
+    # shortcut: issue counts come from the untrimmed fetch, so shares can be slightly off for truncated "all" runs.
+    issues = [dict(i, share=round(i["count"] / n, 4) if n else 0.0) for i in index["issues"]]
+    result["top_issues"] = [_public_issue(i) for i in issues[:10]]
+    result["warnings"] = _analysis_warnings(categorized, issues, index["ignored"], truncated)
+    result["ignored"] = index["ignored"]
+    graph = result.get("graph_report") or {}
+    stored = {
+        "org": org, "source": display_name, "samples": index["samples"], "issues": issues,
+        "ignored": index["ignored"], "warnings": result["warnings"],
+        "models": [{k: m.get(k) for k in ("name", "aic", "total_expected_failures")} for m in result.get("models", [])],
+        "keystones": graph.get("keystone_categories") or [], "top_cascade": graph.get("top_cascade"),
+    }
+    try:
+        await asyncio.to_thread(rm_config.atomic_write_json, rm_config.samples_dir() / f"{result['id']}.json", stored)
+    except OSError:
+        logger.warning("Could not save event data for %s", result["id"], exc_info=True)
     if project_counts:
         result["projects"] = dict(sorted(project_counts.items(), key=lambda kv: kv[1], reverse=True))
     return result

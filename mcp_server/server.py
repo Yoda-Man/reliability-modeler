@@ -99,10 +99,11 @@ mcp = MCPServer(
     "reliability-modeler",
     instructions=(
         "Reliability analyses of production errors pulled from Sentry. Start with "
-        "list_analyses or get_trends for existing data; run_analysis pulls fresh events "
-        "(slow, up to ~4 min). To fix the most impactful failures: list_keystone_failures, "
-        "then get_failure_context(category) for stack traces and code locations. Use graphql "
-        "for full failure graphs and cascade chains of a specific analysis ID."
+        "get_analysis_brief (newest analysis by default): verdict, trend, top issues, warnings "
+        "and next steps in one call. To fix bugs: list_top_issues, then get_issue_context(group_id) "
+        "for the stack trace and code location. run_analysis pulls fresh events (slow, up to ~4 min); "
+        "list_sentry_organizations / list_sentry_projects find what to analyse. Category-level views: "
+        "list_keystone_failures and get_failure_context(category); graphql for full failure graphs."
     ),
 )
 
@@ -183,6 +184,31 @@ def get_failure_context(category: str, analysis_id: str = "latest", limit: int =
     the bug. Local variables, request and user data are never included."""
     aid = urllib.parse.quote(_analysis_id(analysis_id), safe="")
     return _call("GET", f"/analyses/{aid}/context", params={"category": category, "limit": limit})
+
+
+@mcp.tool()
+def get_analysis_brief(analysis_id: str = "latest") -> dict:
+    """Everything about one analysis (default: the newest) in one call: failures, MTBF, best model and
+    expected remaining failures, reliability trend for that source, top 5 issues, keystone categories,
+    warnings about data quality, ignored noise, and concrete next steps. Start here."""
+    return _call("GET", f"/analyses/{urllib.parse.quote(_analysis_id(analysis_id), safe='')}/brief")
+
+
+@mcp.tool()
+def list_top_issues(analysis_id: str = "latest", limit: int = 10) -> dict:
+    """Sentry issues of an analysis ranked by event count: one row per bug, with share of all failures,
+    culprit, file location, first/last seen, burst flag and Sentry link. Fix from the top."""
+    aid = urllib.parse.quote(_analysis_id(analysis_id), safe="")
+    return _call("GET", f"/analyses/{aid}/issues", params={"limit": limit})
+
+
+@mcp.tool()
+def get_issue_context(group_id: str, analysis_id: str = "latest") -> dict:
+    """Stack trace of the most recent event of one Sentry issue (group_id from list_top_issues):
+    exception type and message, culprit, release, environment and the top stack frames (file, function,
+    line, code line, the app's own code first). Local variables and user data are never included."""
+    aid = urllib.parse.quote(_analysis_id(analysis_id), safe="")
+    return _call("GET", f"/analyses/{aid}/issues/{urllib.parse.quote(group_id, safe='')}/context")
 
 
 if __name__ == "__main__":

@@ -398,8 +398,9 @@ def test_samples_keep_newest_events_per_category_capped(fake, taxonomy):
     events = [dict(_event(i, "DB timeout" if i % 2 else "http 502"), eventID=_eid(i)) for i in range(14)]
     events.append(dict(_event(20), eventID="not-a-sentry-id"))
     fake.route(EVENTS, (200, events, fake.link(EVENTS, "x", results=False)))
-    samples = {}
-    load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base, event_samples=samples)
+    index = {}
+    load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base, event_index=index)
+    samples = index["samples"]
     assert sorted(samples) == ["Database", "Network"]
     assert len(samples["Database"]) == sentry.SAMPLES_PER_CATEGORY
     assert [r["event_id"] for r in samples["Database"]] == [_eid(i) for i in (13, 11, 9, 7, 5)]  # newest first
@@ -464,3 +465,66 @@ def test_get_event_context_validates_input_and_shape(fake):
     fake.route(path, (200, [1, 2], {}))
     with pytest.raises(SentryError, match="JSON object"):
         get_event_context("acme", "web", _eid(1), "tok", base_url=fake.base)
+
+
+# ── Issues, ignore rules and richer descriptions (2.15) ─────────────────────
+
+def test_synthetic_title_and_html_error_page_get_a_useful_description():
+    ev = {"title": "processDueCampaigns", "location": "/app/dist/jobs/campaign-scheduler.js",
+          "metadata": {"synthetic": True, "type": "Error", "function": "processDueCampaigns",
+                       "value": "<!DOCTYPE html>\n<html>..."}}
+    desc = sentry._event_description(ev)
+    assert desc == ("Error in processDueCampaigns (/app/dist/jobs/campaign-scheduler.js) "
+                    "[upstream HTTP response was an HTML error page]")
+    plain = {"title": "TypeError: x is undefined", "metadata": {"type": "TypeError", "value": "x is undefined"}}
+    assert sentry._event_description(plain) == "TypeError: x is undefined"
+
+
+def test_ignore_rule_wins_whatever_its_position(tmp_path):
+    cats = [("Network", {"http", "cors"}), ("Ignore", {"miner.invalid"})]
+    assert sentry.is_ignored("CORS: origin http://miner.invalid not allowed", cats)
+    assert not sentry.is_ignored("CORS: origin https://api.example.com not allowed", cats)
+
+
+def _issue_event(i, gid, title, hours=0):
+    return dict(_event(hours if hours else i, title), eventID=_eid(i), groupID=gid,
+                culprit=f"{title} culprit", location="/app/x.js")
+
+
+def test_index_ranks_issues_flags_bursts_and_drops_ignored(fake, tmp_path, monkeypatch):
+    monkeypatch.setenv("SENTRY_BASE_URL", "https://sentry.io/api/0/")
+    taxonomy = tmp_path / "t.conf"
+    taxonomy.write_text("Network [cors, http]\nIgnore [miner.invalid]\nGeneral Error [error]\n")
+    burst = [_issue_event(i, "1", "Error: Invariant failed", hours=100 + i * 0.1) for i in range(25)]
+    spread = [_issue_event(100 + i, "2", "CORS: origin https://api.acme.co not allowed", hours=i * 20) for i in range(5)]
+    noise = [_issue_event(200 + i, "3", "CORS: origin http://miner.invalid not allowed") for i in range(3)]
+    fake.route(EVENTS, (200, burst + spread + noise, fake.link(EVENTS, "x", results=False)))
+    index = {}
+    t, cat_list, *_ = load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base, event_index=index)
+    assert len(t) == 30  # the 3 ignored events are not in the timeline
+    out = sentry.finalize_event_index(index, "acme", base_url="https://sentry.io/api/0/")
+    assert [(i["group_id"], i["count"], i["burst"]) for i in out["issues"]] == [("1", 25, True), ("2", 5, False)]
+    first = out["issues"][0]
+    assert first["category"] == "General Error" and first["culprit"] == "Error: Invariant failed culprit"
+    assert first["sentry_url"] == "https://acme.sentry.io/issues/1/" and "_times" not in first
+    assert first["first_seen"] < first["last_seen"]
+    assert out["ignored"] == {"count": 3, "top_titles": [{"title": "CORS: origin http://miner.invalid not allowed",
+                                                          "count": 3}]}
+    assert "3" not in {i["group_id"] for i in out["issues"]}
+
+
+def test_issue_url_only_for_sentry_io():
+    assert sentry.issue_url("acme", "42", "https://de.sentry.io/api/0/") == "https://acme.sentry.io/issues/42/"
+    assert sentry.issue_url("acme", "42", "https://sentry.internal/api/0/") is None
+    assert sentry.issue_url("acme", "x42", "https://sentry.io/api/0/") is None
+
+
+def test_issue_title_is_its_most_common_variant(fake, taxonomy):
+    events = ([_issue_event(i, "7", "CORS: origin https://api.acme.co not allowed", hours=i) for i in range(5)]
+              + [_issue_event(10, "7", "CORS: origin http://bot.example not allowed", hours=50)])  # newest
+    fake.route(EVENTS, (200, events, fake.link(EVENTS, "x", results=False)))
+    index = {}
+    load_sentry_failures("acme", "web", "tok", taxonomy, base_url=fake.base, event_index=index)
+    issue = sentry.finalize_event_index(index, "acme")["issues"][0]
+    assert issue["title"] == "CORS: origin https://api.acme.co not allowed" and issue["count"] == 6
+    assert "_titles" not in issue

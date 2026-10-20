@@ -47,6 +47,7 @@ export default function UserManualView() {
                         <InfoCard title="MTBF" text="Mean Time Between Failures. Higher values indicate a more stable release." />
                         <InfoCard title="Residuals" text="The estimated number of hidden bugs still lurking in the code." />
                         <InfoCard title="AIC" text="A mathematical score for fit quality. The engine recommends the model with the lowest AIC." />
+                        <InfoCard title="Top Issues & Warnings" text="Top Issues lists the Sentry bugs with the most events (fix these first, with a link to each issue). Amber notes flag results to read with care, e.g. one issue dominating or events dropped by an Ignore taxonomy line." />
                         <InfoCard title="Intensity" text="The frequency of failures. A downward trend is required for a 'GO' release decision." />
                     </div>
                 </ManualSection>

@@ -54,6 +54,10 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _SLUG_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
 _EVENT_ID_RE = re.compile(r'^[0-9a-fA-F]{32}$')
 SAMPLES_PER_CATEGORY = 5      # event references kept per category for on-demand context
+IGNORE_CATEGORY = "ignore"     # taxonomy lines named "Ignore" mark noise to leave out
+BURST_WINDOW_HOURS = 24
+BURST_MIN_EVENTS = 20
+BURST_SHARE = 0.8             # an issue is a burst when this share of its events fall in one window
 MAX_CONTEXT_FRAMES = 8        # stack frames returned per exception
 MAX_TEXT = 500                # truncation for messages and code lines
 # Only these tags are passed on; others (user, url, server_name, ...) may hold personal or internal data.
@@ -307,6 +311,13 @@ def _event_description(event: dict) -> str:
     title = event.get("title") or ""
     message = event.get("message") or ""
     desc = title or message or "Unknown error"
+    meta = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    if meta.get("synthetic"):
+        # Sentry had no real message and used the function name as the title; say what and where.
+        where = event.get("location") or meta.get("filename")
+        desc = f"{meta.get('type') or 'Error'} in {meta.get('function') or desc}" + (f" ({where})" if where else "")
+    if str(meta.get("value") or "").lstrip()[:15].lower().startswith(("<!doctype html", "<html")):
+        desc += " [upstream HTTP response was an HTML error page]"
 
     # Enrich with exception metadata if present
     if "exception" in event and isinstance(event["exception"], dict):
@@ -347,21 +358,100 @@ def _events_to_raw(events: List[dict], source: str, tag: Optional[str] = None) -
     return raw
 
 
-def _collect_samples(events: List[dict], project: str, fault_categories, multi_label: bool,
-                     samples: Dict[str, List[dict]], tag: Optional[str] = None) -> None:
-    """Record up to SAMPLES_PER_CATEGORY newest event references per category into ``samples``."""
+def is_ignored(desc: str, fault_categories) -> bool:
+    """True when ``desc`` matches a taxonomy line named Ignore, whatever its position in the file."""
+    d = (desc or "").lower()
+    return any(str(name).lower() == IGNORE_CATEGORY and any(kw in d for kw in kws)
+               for name, kws in fault_categories or [])
+
+
+def _index_events(events: List[dict], project: str, fault_categories, multi_label: bool,
+                  index: Dict, tag: Optional[str] = None) -> None:
+    """
+    Fill ``index`` in place from one project's events (newest first):
+    ``samples``  category -> up to SAMPLES_PER_CATEGORY event refs, for stack-trace context;
+    ``issues``   Sentry issue id -> title, culprit, location, category, count, first/last seen;
+    ``ignored``  events left out by Ignore rules (count, titles).
+    Call :func:`finalize_event_index` once all projects are indexed.
+    """
+    samples = index.setdefault("samples", {})
+    issues = index.setdefault("issues", {})
+    ignored = index.setdefault("ignored", {"count": 0, "titles": {}})
     for event in sorted(events, key=lambda e: str(e.get("dateCreated") or ""), reverse=True):
-        event_id = str(event.get("eventID") or event.get("id") or "")
-        if not _EVENT_ID_RE.match(event_id):
-            continue
         desc = _event_description(event)
-        cats = categorize_description(f"[project: {tag}] {desc}" if tag else desc, fault_categories, multi_label)
-        for cat in cats if isinstance(cats, list) else [cats]:
-            bucket = samples.setdefault(cat, [])
-            if len(bucket) < SAMPLES_PER_CATEGORY:
-                bucket.append({"project": project, "event_id": event_id,
-                               "title": str(event.get("title") or "")[:200],
-                               "date": str(event.get("dateCreated") or "")})
+        desc = f"[project: {tag}] {desc}" if tag else desc
+        title = str(event.get("title") or desc)[:200]
+        if is_ignored(desc, fault_categories):
+            ignored["count"] += 1
+            ignored["titles"][title] = ignored["titles"].get(title, 0) + 1
+            continue
+        cats = categorize_description(desc, fault_categories, multi_label)
+        cats = cats if isinstance(cats, list) else [cats]
+        event_id = str(event.get("eventID") or event.get("id") or "")
+        event_id = event_id if _EVENT_ID_RE.match(event_id) else ""
+        date = str(event.get("dateCreated") or "")
+        if event_id:
+            for cat in cats:
+                bucket = samples.setdefault(cat, [])
+                if len(bucket) < SAMPLES_PER_CATEGORY:
+                    bucket.append({"project": project, "event_id": event_id, "title": title, "date": date})
+        group_id = str(event.get("groupID") or "")
+        if not group_id.isdigit():
+            continue
+        issue = issues.get(group_id)
+        if issue is None:
+            issue = issues[group_id] = {
+                "group_id": group_id, "project": project, "title": title,
+                "culprit": event.get("culprit") or None, "location": event.get("location") or None,
+                "category": cats[0], "count": 0, "first_seen": date, "last_seen": date,
+                "sample_event_id": event_id or None, "_times": [], "_titles": {},
+            }
+        issue["count"] += 1
+        issue["_titles"][title] = issue["_titles"].get(title, 0) + 1
+        issue["first_seen"] = min(issue["first_seen"], date) if date else issue["first_seen"]
+        issue["last_seen"] = max(issue["last_seen"], date)
+        dt = _parse_event_timestamp(event)
+        if dt is not None:
+            issue["_times"].append(dt.timestamp())
+
+
+def issue_url(org: str, group_id: str, base_url: Optional[str] = None) -> Optional[str]:
+    """Link to an issue in the Sentry UI (sentry.io only; self-hosted URLs vary)."""
+    if _is_saas(_base_url(base_url)) and _SLUG_RE.match(org or "") and str(group_id).isdigit():
+        return f"https://{org}.sentry.io/issues/{group_id}/"
+    return None
+
+
+def _is_burst(times: List[float]) -> bool:
+    if len(times) < BURST_MIN_EVENTS:
+        return False
+    times = sorted(times)
+    window, lo, most = BURST_WINDOW_HOURS * 3600, 0, 0
+    for hi, t in enumerate(times):
+        while t - times[lo] > window:
+            lo += 1
+        most = max(most, hi - lo + 1)
+    return most >= BURST_SHARE * len(times)
+
+
+def finalize_event_index(index: Dict, org: str, base_url: Optional[str] = None) -> Dict:
+    """Turn the raw index into its stored form: issues ranked by count with burst flags and
+    Sentry links, ignored titles reduced to the top 10."""
+    issues = []
+    for issue in index.get("issues", {}).values():
+        times = issue.pop("_times", [])
+        titles = issue.pop("_titles", {})
+        if titles:  # Sentry groups variants (e.g. different CORS origins); show the most common one
+            issue["title"] = max(titles.items(), key=lambda kv: kv[1])[0]
+        issues.append({**issue, "burst": _is_burst(times), "sentry_url": issue_url(org, issue["group_id"], base_url)})
+    issues.sort(key=lambda i: (-i["count"], i["title"]))
+    ignored = index.get("ignored") or {"count": 0, "titles": {}}
+    top = sorted(ignored["titles"].items(), key=lambda kv: -kv[1])[:10]
+    return {
+        "samples": index.get("samples", {}),
+        "issues": issues,
+        "ignored": {"count": ignored["count"], "top_titles": [{"title": t, "count": c} for t, c in top]},
+    }
 
 
 def _clip(value, limit: int = MAX_TEXT) -> Optional[str]:
@@ -493,7 +583,8 @@ def _normalize_raw_events(
     fault_categories: Optional[list],
     multi_label: bool,
 ) -> Tuple[np.ndarray, List[Tuple], datetime]:
-    """Normalize (datetime, desc) pairs into (t_hours, cat_list, t0)."""
+    """Normalize (datetime, desc) pairs into (t_hours, cat_list, t0); events matching Ignore rules are dropped."""
+    raw_events = [(dt, desc) for dt, desc in raw_events if not is_ignored(desc, fault_categories)]
     if not raw_events:
         return np.array([]), [], datetime.now(timezone.utc)
 
@@ -529,7 +620,7 @@ def load_sentry_failures(
     multi_label: bool = False,
     base_url: Optional[str] = None,
     cancel_event: Optional[threading.Event] = None,
-    event_samples: Optional[Dict[str, List[dict]]] = None,
+    event_index: Optional[Dict] = None,
 ) -> Tuple[np.ndarray, List[Tuple], datetime, list, bool]:
     """
     Pull failure events from a single Sentry project and return the normalized
@@ -549,8 +640,8 @@ def load_sentry_failures(
         logger.warning("Sentry: no events found for %s/%s in last %d days", org, project, days)
         return np.array([]), [], datetime.now(timezone.utc), fault_categories, False
 
-    if event_samples is not None:  # filled in place: newest event refs per category, for get_event_context
-        _collect_samples(all_events, project, fault_categories, multi_label, event_samples)
+    if event_index is not None:  # samples, issues and ignored noise; see _index_events
+        _index_events(all_events, project, fault_categories, multi_label, event_index)
     raw_events = _events_to_raw(all_events, f"{org}/{project}")
     t_hours, cat_list, t0 = _normalize_raw_events(raw_events, fault_categories, multi_label)
     logger.info("Sentry: processed %d failure events from %s/%s", len(cat_list), org, project)
@@ -566,7 +657,7 @@ def load_sentry_failures_all(
     base_url: Optional[str] = None,
     max_projects: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
-    event_samples: Optional[Dict[str, List[dict]]] = None,
+    event_index: Optional[Dict] = None,
 ) -> Tuple[np.ndarray, List[Tuple], datetime, list, Dict[str, int], bool]:
     """
     Pull failure events from ALL projects in an org and aggregate them into a
@@ -615,8 +706,8 @@ def load_sentry_failures_all(
             logger.warning("Sentry: skipping project %s: %s", slug, e)
             continue
 
-        if event_samples is not None:
-            _collect_samples(events, slug, fault_categories, multi_label, event_samples, tag=name)
+        if event_index is not None:
+            _index_events(events, slug, fault_categories, multi_label, event_index, tag=name)
         raw = _events_to_raw(events, f"{org}/{slug}", tag=name)
         per_project.append((name, raw))
         if project_truncated and raw:

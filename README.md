@@ -2,7 +2,7 @@
 
 Turn the errors you already collect in Sentry into reliability forecasts: MTBF, remaining faults and the failure patterns that drive them.
 
-[![Version](https://img.shields.io/badge/version-2.14.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.15.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker Hub](https://img.shields.io/badge/docker-trustaldo%2Freliability--modeler--api-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/trustaldo/reliability-modeler-api)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -29,6 +29,8 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 - Recurring cascade chains with occurrence count, latency and confidence.
 - Louvain communities, graph density and plain-language insights.
 - Cross-analysis view of categories that are keystone most often.
+- Top Issues: failures ranked by Sentry issue (one row per bug) with share, location, burst flag and a Sentry link, plus warnings when the taxonomy is too coarse or one bug dominates the model.
+- `Ignore [...]` taxonomy rules leave bot probes and other noise out of models and rankings.
 - Interactive failure-network view on the Dashboard: categories sized by PageRank, coloured by community, with co-occurrence links and cascade arrows; click a category to see what it triggers and what triggers it.
 
 **Sentry ingestion**
@@ -37,7 +39,7 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 - Per-project and system-wide breakdowns; MTBF and failure-rate trends per source.
 
 **AI agents via MCP**
-- Stdio MCP server with eight tools for Claude Code, Codex, Claude Desktop and other MCP clients.
+- Stdio MCP server with eleven tools for Claude Code, Codex, Claude Desktop and other MCP clients.
 - Uses the UI login from the repo `.env`, so no secret goes into agent configs.
 
 **Operations**
@@ -50,16 +52,20 @@ Turn the errors you already collect in Sentry into reliability forecasts: MTBF, 
 
 <table>
   <tr>
+    <td width="50%"><img src="docs/screenshots/issues.png" width="100%" alt="Top issues"><br><sub><b>Top issues</b>: one row per Sentry issue: share of failures, culprit, last seen, burst flag and Sentry link. Fix from the top.</sub></td>
+    <td width="50%"><img src="docs/screenshots/network.png" width="100%" alt="Failure network graph"><br><sub><b>Failure network</b>: keystones, bridges, co-occurrence and cascades; click a category for its triggers.</sub></td>
+  </tr>
+  <tr>
     <td width="50%"><img src="docs/screenshots/sentry.png" width="100%" alt="Sentry analysis form"><br><sub><b>Run an analysis</b>: connect Sentry once, pick any organization and project (or all projects), look-back window, forecast horizon.</sub></td>
     <td width="50%"><img src="docs/screenshots/trends.png" width="100%" alt="Reliability trends"><br><sub><b>Reliability trends</b>: MTBF and failure rate per source across runs.</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/screenshots/logs.png" width="100%" alt="Analysis archive"><br><sub><b>Analysis archive</b>: every completed run, searchable and paginated.</sub></td>
-    <td width="50%"><img src="docs/screenshots/config.png" width="100%" alt="Taxonomy and settings"><br><sub><b>Taxonomy and settings</b>: fault categories, multi-label tagging, solver settings.</sub></td>
+    <td width="50%"><img src="docs/screenshots/config.png" width="100%" alt="Taxonomy and settings"><br><sub><b>Taxonomy and settings</b>: fault categories, Ignore rules for noise, multi-label tagging, solver settings.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/network.png" width="100%" alt="Failure network graph"><br><sub><b>Failure network</b>: keystones, bridges, co-occurrence and cascades; click a category for its triggers.</sub></td>
-    <td width="50%"><img src="docs/screenshots/agents.png" width="100%" alt="Connect AI agents"><br><sub><b>Connect AI agents</b>: copyable MCP setup for each client.</sub></td>
+    <td width="50%"><img src="docs/screenshots/agents.png" width="100%" alt="Connect AI agents"><br><sub><b>Connect AI agents</b>: copyable MCP setup for Claude Code, Codex and other clients.</sub></td>
+    <td width="50%"></td>
   </tr>
 </table>
 
@@ -87,7 +93,7 @@ docker compose ps        # both services should become "healthy"
 
 Open **http://localhost:3000** and sign in with `UI_USERNAME` (default `admin`) and `UI_PASSWORD`. Go to **Sentry**, enter your org and project, then **Pull & Analyze**.
 
-`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.14.0` in `.env`.
+`docker compose` refuses to start if `RELIABILITY_API_KEY` or `UI_PASSWORD` is missing. Pin a release with `IMAGE_TAG=2.15.0` in `.env`.
 
 ## Architecture
 
@@ -198,6 +204,9 @@ The browser and MCP server reach these routes as `/api/<path>` through the UI pr
 | POST | `/logs/prune?retention_days=` | API key | Delete archived files older than N days (minimum 7) |
 | GET | `/trends` | API key | Cross-run MTBF and failure-rate trends, grouped per source (`groups`) |
 | GET | `/report/{id}/html` | API key | Self-contained, print-ready HTML report for one run |
+| GET | `/analyses/{id}/brief` | API key | One-call summary for agents: verdict, trend, top issues, keystones, warnings, next steps |
+| GET | `/analyses/{id}/issues?limit=` | API key | Sentry issues of the run ranked by event count (share, culprit, location, burst, Sentry link) |
+| GET | `/analyses/{id}/issues/{group_id}/context` | API key | Live stack trace of an issue's latest event |
 | GET | `/analyses/{id}/context?category=&limit=` | API key | Live stack-trace context for up to 5 recent events in a category (`id` may be `latest`). No local variables, request or user data |
 | POST | `/graphql` | API key | Failure-graph queries over archived analyses |
 | GET | `/docs`, `/redoc`, `/openapi.json` | API key | Interactive API docs |
@@ -230,6 +239,9 @@ Limits: 256 KB per query, depth 8, at most 10 graph-building fields per request,
 | `get_trends()` | MTBF and failure-rate trends per source |
 | `list_sentry_organizations()` | Every Sentry org the token can see, across regions |
 | `list_keystone_failures(analysis_id, limit)` | Categories ranked by PageRank, keystone and bridge flags (default: newest analysis) |
+| `get_analysis_brief(analysis_id)` | One call: failures, MTBF, best model, trend, top issues, keystones, warnings, next steps (default: newest analysis). Start here |
+| `list_top_issues(analysis_id, limit)` | Sentry issues ranked by events: share, culprit, location, burst flag, Sentry link |
+| `get_issue_context(group_id, analysis_id)` | Stack trace of an issue's latest event: exception, top frames with file/function/line/code |
 | `get_failure_context(category, analysis_id, limit)` | Stack traces behind a category: exception, culprit, release, top frames with file/function/line/code, Sentry link |
 | `list_sentry_projects(org)` | Projects in a Sentry org |
 | `run_analysis(org, project, days, future_hours)` | A fresh analysis (up to about 4 minutes); plots stripped |

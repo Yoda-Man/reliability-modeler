@@ -8,7 +8,8 @@ import Dashboard from '@/components/Dashboard';
 import SentryView from '@/components/SentryView';
 import TrendsView from '@/components/TrendsView';
 import FailureNetworkGraph, { layoutNetwork } from '@/components/FailureNetworkGraph';
-import type { AnalysisResults, CategorizedFailure, GraphReport, TrendRun } from '@/lib/types';
+import TopIssues from '@/components/TopIssues';
+import type { AnalysisResults, CategorizedFailure, GraphReport, TopIssue, TrendRun } from '@/lib/types';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -285,5 +286,68 @@ describe('FailureNetworkGraph', () => {
     cleanup();
     render(<Dashboard data={results({ graph_report: network })} />);
     expect(screen.getByRole('img', { name: 'Failure network of 3 categories' })).toBeTruthy();
+  });
+});
+
+const issue = (id: string, title: string, count: number, share: number, extra: Partial<TopIssue> = {}): TopIssue => ({
+  group_id: id, project: 'web', title, culprit: `app.${id}`, location: null, category: 'Network', count, share,
+  first_seen: '2026-01-01T00:00:00Z', last_seen: '2026-01-02T00:00:00Z', burst: false, sentry_url: null, ...extra,
+});
+
+describe('TopIssues and warnings', () => {
+  it('renders issues in the given order with share, burst badge and Sentry link', () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    const issues = [
+      issue('2', 'Second biggest by id but first', 300, 0.6, { burst: true, sentry_url: 'https://acme.sentry.io/issues/2/' }),
+      issue('1', 'TypeError: x is undefined', 50, 0.1),
+    ];
+    render(<Dashboard data={results({ top_issues: issues })} />);
+    expect(screen.getByText('Fix these first — each row is one bug in Sentry.')).toBeTruthy();
+    const titles = screen.getAllByTitle(/Second biggest|TypeError/).map(el => el.textContent);
+    expect(titles).toEqual(['Second biggest by id but first', 'TypeError: x is undefined']);
+    expect(screen.getByText('300 · 60%')).toBeTruthy();
+    expect(screen.getByText('50 · 10%')).toBeTruthy();
+    expect(screen.getByText('app.2')).toBeTruthy();
+    expect(screen.getAllByText('burst').length).toBe(1);
+    const links = screen.getAllByRole('link', { name: /Sentry/ });
+    expect(links.length).toBe(1);
+    expect(links[0].getAttribute('href')).toBe('https://acme.sentry.io/issues/2/');
+    expect(links[0].getAttribute('target')).toBe('_blank');
+    expect(links[0].getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('is hidden when there are no issues', () => {
+    const { container } = render(<TopIssues issues={[]} />);
+    expect(container.innerHTML).toBe('');
+    render(<TopIssues />);
+    expect(screen.queryByText('Top Issues')).toBeNull();
+  });
+
+  it('renders warnings as notes, ignored titles, and only one truncated note', () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    render(<Dashboard data={results({
+      truncated: true,
+      warnings: [
+        { code: 'dominant_issue', message: 'One issue is 60% of all events.' },
+        { code: 'noise_ignored', message: '12 events were ignored as noise.' },
+        { code: 'truncated', message: 'Backend truncated message.' },
+      ],
+      ignored: { count: 12, top_titles: [{ title: 'miner.invalid', count: 12 }] },
+    })} />);
+    const notes = screen.getAllByRole('note').map(n => n.textContent);
+    expect(notes.length).toBe(3);
+    expect(notes[0]).toContain("hit Sentry's event cap");
+    expect(notes[1]).toContain('One issue is 60% of all events.');
+    expect(notes[2]).toContain('12 event(s) ignored by the taxonomy');
+    expect(notes[2]).toContain('12 × miner.invalid');
+    expect(screen.queryByText('Backend truncated message.')).toBeNull();
+  });
+
+  it('still renders an older response without the new fields', () => {
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    render(<Dashboard data={results()} />);
+    expect(screen.getByText('Total Failures')).toBeTruthy();
+    expect(screen.queryByText('Top Issues')).toBeNull();
+    expect(screen.queryByRole('note')).toBeNull();
   });
 });

@@ -5,6 +5,22 @@ All notable changes to the **Reliability Modeler** project will be documented in
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.0] - 2026-10-20
+
+Agent-oriented analysis, driven by a real run (anchorstay: 1,006 failures came from just 11 distinct errors, two of them 98%).
+
+### Added
+- **Top issues.** Failures are ranked by Sentry issue (`groupID`, already in the event list, so no extra Sentry calls): count, share, culprit, file location, first/last seen, burst flag, Sentry link. In the ingest response (`top_issues`), `GET /analyses/{id}/issues`, and a **Top Issues** card on the Dashboard.
+- **Issue stack traces:** `GET /analyses/{id}/issues/{group_id}/context`.
+- **One-call brief for agents:** `GET /analyses/{id}/brief` (verdict, MTBF, best model and expected remaining failures, trend for that source, top issues, keystones, warnings, ignored noise, next steps).
+- **Warnings** (`warnings` in the response, amber notes on the Dashboard): catch-all categories hold most failures (with example errors to write rules for); one issue dominates the model; an issue bursts (≥80% of ≥20 events within 24 h); noise was ignored.
+- **Ignore rules:** a taxonomy line named `Ignore [...]` leaves matching events (bot probes, scanners) out of the timeline, models, graphs and rankings; they are counted in `ignored`.
+- MCP tools `get_analysis_brief` (recommended first call), `list_top_issues`, `get_issue_context`.
+
+### Changed
+- **Better descriptions for events without a real message.** When Sentry falls back to a function name as the title (`metadata.synthetic`), the description becomes "<type> in <function> (<file>)", and an HTML error page returned by an upstream service is flagged, so these events are categorised (previously "Uncategorized").
+- The per-analysis event file (`output/samples/<id>.json`) now also holds issues, warnings, model summary and keystones.
+
 ## [2.14.0] - 2026-10-19
 
 ### Added
